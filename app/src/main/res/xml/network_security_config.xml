@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    KumaCheck connects to user-configured Uptime Kuma servers; many users
+    self-host on a LAN with no TLS termination (http://192.168.x.x:3001 or
+    http://kuma.lan). Android's network security config can't match IP CIDR
+    ranges via <domain> entries, so we permit cleartext globally and rely on
+    a login-screen warning to surface the tradeoff to the user.
+
+    Trust anchors are intentionally left at platform defaults (system CAs
+    only) — user-installed CAs are not trusted, so a malicious certificate
+    sideloaded onto the device cannot MITM the connection.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

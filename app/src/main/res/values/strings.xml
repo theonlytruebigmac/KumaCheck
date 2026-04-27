@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KumaCheck</string>
+    <string name="widget_status_tile_description">Status tile — current up/down/maintenance counts at a glance.</string>
+    <string name="widget_status_list_description">Monitor list — top problematic monitors with response times.</string>
+    <string name="widget_status_micro_description">Status pulse — single-cell live status indicator.</string>
+</resources>

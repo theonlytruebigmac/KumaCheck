@@ -1,0 +1,71 @@
+# === Gradle build outputs ===
+.gradle/
+build/
+/app/release
+
+# === IntelliJ / Android Studio ===
+*.iml
+*.ipr
+*.iws
+out/
+/.idea/*
+# Keep team-shared IDE config (code style + inspections) but ignore everything else.
+!/.idea/codeStyles
+!/.idea/inspectionProfiles
+
+# === VS Code ===
+# Personal editor preferences should not be checked in.
+.vscode/
+
+# === Android-specific ===
+local.properties
+captures/
+.externalNativeBuild
+.cxx/
+.cxx
+.navigation/
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# === Kotlin ===
+.kotlin/
+
+# === Logs and dumps ===
+*.log
+*.hprof
+*.heapdump
+# JVM crash dumps that land next to the process working dir.
+hs_err_pid*.log
+replay_pid*.log
+
+# === Signing / secrets — NEVER commit these ===
+*.jks
+*.keystore
+*.p12
+.env
+.env.*
+keystore.properties
+secrets.properties
+google-services.json
+
+# === OS junk ===
+.DS_Store
+Thumbs.db
+desktop.ini
+# macOS resource-fork sidecars (created when files are touched via SMB/Finder).
+._*
+
+# === Editor / VCS leftovers ===
+*.swp
+*.swo
+*~
+# Backups left by `git mergetool` after conflict resolution.
+*.orig
+
+# === Claude Code ===
+# Per-user prefs are ignored; opt-in shared config can be committed via the
+# whitelist below.
+.claude/*
+!.claude/settings.json

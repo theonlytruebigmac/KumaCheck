@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.KumaCheck" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- Cream window background eliminates the black flash that appears when
+             the OS (or a password-manager autofill flow) re-lays out under
+             Compose. -->
+        <item name="android:windowBackground">@color/kuma_cream</item>
+        <item name="android:colorBackground">@color/kuma_cream</item>
+
+        <!-- Match the app's cream surface in the system bars. Light icons since
+             the cream is light; navigationBarDividerColor avoids a hairline gap. -->
+        <item name="android:statusBarColor">@color/kuma_cream</item>
+        <item name="android:navigationBarColor">@color/kuma_cream</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">true</item>
+
+        <!-- Override Android's bright-yellow autofilled highlight with a
+             low-alpha terra so password-manager fills don't clash with the
+             cozy palette. (API 26+; older versions ignore.) -->
+        <item name="android:autofilledHighlight" tools:targetApi="o">@color/kuma_terra_low</item>
+    </style>
+</resources>
