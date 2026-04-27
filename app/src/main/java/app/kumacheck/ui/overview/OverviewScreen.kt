@@ -510,6 +510,7 @@ private fun MonitorListCard(
                     pingMs = responseById[st.monitor.id]?.avgPingMs
                         ?: st.lastHeartbeat?.ping?.takeIf { it.isFinite() && it >= 0 }?.toInt(),
                     spark = responseById[st.monitor.id]?.recentPings.orEmpty(),
+                    recentStatuses = recentStatuses[st.monitor.id].orEmpty(),
                     nowMs = nowMs,
                     onClick = { onTap(st.monitor.id) },
                 )
@@ -526,6 +527,7 @@ private fun MonitorRow(
     state: MonitorState,
     pingMs: Int?,
     spark: List<Double>,
+    recentStatuses: List<MonitorStatus>,
     nowMs: Long,
     onClick: () -> Unit,
 ) {
@@ -562,6 +564,10 @@ private fun MonitorRow(
                 maxLines = 1,
             )
         }
+        // Trailing chart slot:
+        //   - Ping-style monitors with a usable latency series → sparkline + ms readout.
+        //   - Everything else (Docker, DNS, group, push, etc.) → status strip of the
+        //     last N beats so the row says something more useful than "—".
         if (spark.size >= 2) {
             Spacer(Modifier.width(8.dp))
             val sparkColor = when (state.status) {
@@ -576,17 +582,67 @@ private fun MonitorRow(
                 color = sparkColor,
                 modifier = Modifier.width(54.dp).height(18.dp),
             )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                pingMs?.let { "${it}ms" } ?: "—",
+                color = KumaInk,
+                fontFamily = KumaMono,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 11.sp,
+                modifier = Modifier.widthIn(min = 38.dp),
+            )
+        } else if (recentStatuses.isNotEmpty()) {
+            Spacer(Modifier.width(8.dp))
+            // Cap to the last N beats so each cell has visible width in the
+            // 54dp slot — without this the row collapses into 1px slivers.
+            StatusGrid(
+                statuses = recentStatuses.takeLast(12),
+                modifier = Modifier.width(54.dp),
+                height = 14.dp,
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                statusWord(state.status, state.monitor.type),
+                color = KumaInk,
+                fontFamily = KumaMono,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 11.sp,
+                modifier = Modifier.widthIn(min = 38.dp),
+            )
+        } else {
+            Spacer(Modifier.width(10.dp))
+            Text(
+                "—",
+                color = KumaSlate2,
+                fontFamily = KumaMono,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 11.sp,
+                modifier = Modifier.widthIn(min = 38.dp),
+            )
         }
-        Spacer(Modifier.width(10.dp))
-        Text(
-            pingMs?.let { "${it}ms" } ?: "—",
-            color = KumaInk,
-            fontFamily = KumaMono,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 11.sp,
-            modifier = Modifier.widthIn(min = 38.dp),
-        )
     }
+}
+
+/**
+ * Per-monitor-type status word for the Overview row's trailing slot. Uses the
+ * MonitorTypeProfile registry so a Docker row reads "Healthy" / "Unhealthy"
+ * and a Push row reads "Receiving" / "Silent" rather than generic "Up/Down".
+ *
+ * Truncates to keep the slot width predictable — the full word (e.g.
+ * "Maintenance") is shown on the detail screen hero instead.
+ */
+private fun statusWord(status: MonitorStatus, type: String?): String {
+    val profile = app.kumacheck.data.model.MonitorTypes.forType(type)
+    val raw = when (status) {
+        MonitorStatus.UP -> profile.healthyVerb
+        MonitorStatus.DOWN -> profile.unhealthyVerb
+        MonitorStatus.PENDING -> "Pend"
+        MonitorStatus.MAINTENANCE -> "Maint"
+        MonitorStatus.UNKNOWN -> "—"
+    }
+    // Cap to keep the row tidy — long verbs like "Unreachable" would shift the
+    // strip column. Detail screen shows the full word.
+    return if (raw.length > 7) raw.take(7) else raw
 }
 
 private fun LazyListScope.recentIncidentsSection(

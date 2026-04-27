@@ -22,8 +22,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.kumacheck.data.model.DisplayMode
 import app.kumacheck.data.model.Heartbeat
 import app.kumacheck.data.model.MonitorStatus
+import app.kumacheck.data.model.MonitorTypes
 import app.kumacheck.util.parseBeatTime
 import app.kumacheck.ui.theme.*
 import com.patrykandpatrick.vico.compose.cartesian.CartesianChartHost
@@ -204,9 +206,35 @@ private fun DetailTopBar(
 
 @Composable
 private fun HeroStatCard(ui: MonitorDetailViewModel.UiState) {
+    val profile = MonitorTypes.forType(ui.monitor?.type)
     val ping = ui.latest?.ping?.takeIf { it >= 0 }?.toInt()
     val pings = ui.history.mapNotNull { it.ping?.takeIf { p -> p >= 0 } }
-    // Compute a simple ↑/↓ pct delta vs the recent average.
+    // Profile drives the layout. We still fall through to StatusHero when a
+    // LATENCY-typed monitor has no usable ping data yet (fresh monitor, or
+    // server downtime ate the history) so the card never shows "—ms".
+    when (profile.mode) {
+        DisplayMode.LATENCY -> if (pings.isNotEmpty()) {
+            ResponseTimeHero(
+                ping = ping,
+                pings = pings,
+                isLoadingHistory = ui.isLoadingHistory,
+                latestMsg = ui.latest?.msg,
+            )
+        } else {
+            StatusHero(ui = ui, profile = profile)
+        }
+        DisplayMode.STATE,
+        DisplayMode.AGGREGATE -> StatusHero(ui = ui, profile = profile)
+    }
+}
+
+@Composable
+private fun ResponseTimeHero(
+    ping: Int?,
+    pings: List<Double>,
+    isLoadingHistory: Boolean,
+    latestMsg: String?,
+) {
     val deltaPct: Int? = if (pings.size >= 4 && ping != null) {
         val recentAvg = pings.takeLast(10).average()
         if (recentAvg > 0) ((ping - recentAvg) / recentAvg * 100).toInt() else null
@@ -253,16 +281,102 @@ private fun HeroStatCard(ui: MonitorDetailViewModel.UiState) {
                     )
                 }
             }
+            if (!latestMsg.isNullOrBlank()) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    latestMsg,
+                    color = KumaSlate2,
+                    fontFamily = KumaMono,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                )
+            }
             if (pings.size >= 2) {
                 Spacer(Modifier.height(14.dp))
-                ResponseChart(pings, isLoading = ui.isLoadingHistory)
+                ResponseChart(pings, isLoading = isLoadingHistory)
                 Spacer(Modifier.height(8.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Text("30 min", color = KumaSlate2, fontFamily = KumaMono, fontSize = 9.sp)
                     Text("15", color = KumaSlate2, fontFamily = KumaMono, fontSize = 9.sp)
                     Text("now", color = KumaSlate2, fontFamily = KumaMono, fontSize = 9.sp)
                 }
-            } else {
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusHero(
+    ui: MonitorDetailViewModel.UiState,
+    profile: app.kumacheck.data.model.MonitorTypeProfile,
+) {
+    val status = ui.latest?.status ?: MonitorStatus.UNKNOWN
+    // Type-aware verbiage from the profile: Docker reads "Healthy/Unhealthy",
+    // Push reads "Receiving/Silent", etc. Falls through to a generic
+    // pending/maintenance/unknown for non-up/down states.
+    val statusLabel = when (status) {
+        MonitorStatus.UP -> profile.healthyVerb
+        MonitorStatus.DOWN -> profile.unhealthyVerb
+        MonitorStatus.PENDING -> "Pending"
+        MonitorStatus.MAINTENANCE -> "Maintenance"
+        MonitorStatus.UNKNOWN -> "—"
+    }
+    val statusColor = when (status) {
+        MonitorStatus.UP -> KumaUp
+        MonitorStatus.DOWN -> KumaDown
+        MonitorStatus.PENDING -> KumaWarn
+        MonitorStatus.MAINTENANCE -> KumaSlate
+        MonitorStatus.UNKNOWN -> KumaPaused
+    }
+    val recentStatuses = ui.history.takeLast(30).map { it.status }
+    val latestMsg = ui.latest?.msg?.takeIf { it.isNotBlank() }
+    KumaCard {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Text(
+                "${profile.displayName.uppercase()} · NOW",
+                color = KumaSlate2,
+                fontFamily = KumaMono,
+                fontSize = 10.sp,
+                letterSpacing = 0.6.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                statusLabel,
+                color = statusColor,
+                fontFamily = KumaMono,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 38.sp,
+                letterSpacing = (-1).sp,
+            )
+            if (latestMsg != null) {
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    latestMsg,
+                    color = KumaSlate2,
+                    fontFamily = KumaMono,
+                    fontSize = 11.sp,
+                    maxLines = 2,
+                )
+            }
+            if (recentStatuses.isNotEmpty()) {
+                Spacer(Modifier.height(14.dp))
+                StatusGrid(
+                    statuses = recentStatuses,
+                    modifier = Modifier.fillMaxWidth(),
+                    height = 18.dp,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(
+                        "${recentStatuses.size} checks",
+                        color = KumaSlate2,
+                        fontFamily = KumaMono,
+                        fontSize = 9.sp,
+                    )
+                    Text("now", color = KumaSlate2, fontFamily = KumaMono, fontSize = 9.sp)
+                }
+            } else if (ui.isLoadingHistory) {
                 Spacer(Modifier.height(14.dp))
                 Box(
                     modifier = Modifier
@@ -271,12 +385,7 @@ private fun HeroStatCard(ui: MonitorDetailViewModel.UiState) {
                         .background(KumaCream2),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        if (ui.isLoadingHistory) "Loading…" else "No response-time data",
-                        color = KumaSlate2,
-                        fontFamily = KumaMono,
-                        fontSize = 11.sp,
-                    )
+                    Text("Loading…", color = KumaSlate2, fontFamily = KumaMono, fontSize = 11.sp)
                 }
             }
         }
@@ -493,7 +602,10 @@ private fun CheckRow(hb: Heartbeat) {
     val time = parseBeatTime(hb.time)
         ?.let { HMS_FORMATTER.format(java.util.Date(it)) }
         ?: hb.time
-    val ms = hb.ping?.takeIf { it.isFinite() && it >= 0 }?.let { "${it.toInt()}ms" } ?: "—"
+    // For status-only monitors (Docker etc.) ping is null/negative — drop the
+    // trailing "—" entirely rather than echoing nothing under a Response Time
+    // column that doesn't apply.
+    val ms = hb.ping?.takeIf { it.isFinite() && it >= 0 }?.let { "${it.toInt()}ms" }
     val statusText = when (hb.status) {
         MonitorStatus.UP -> hb.msg.ifBlank { "200 OK" }
         MonitorStatus.DOWN -> hb.msg.ifBlank { "Failed" }
@@ -523,13 +635,15 @@ private fun CheckRow(hb: Heartbeat) {
             modifier = Modifier.weight(1f),
             maxLines = 1,
         )
-        Text(
-            ms,
-            color = KumaInk,
-            fontFamily = KumaMono,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 12.sp,
-        )
+        if (ms != null) {
+            Text(
+                ms,
+                color = KumaInk,
+                fontFamily = KumaMono,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 12.sp,
+            )
+        }
     }
 }
 
