@@ -1,5 +1,6 @@
 package app.kumacheck.notify
 
+import android.annotation.SuppressLint
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -27,6 +28,11 @@ import kotlinx.coroutines.launch
  * The socket itself is owned by [KumaCheckApp]; this service is a passive
  * subscriber.
  */
+// Every nm.notify in this file is gated by Notifications.hasPostPermission
+// (lines 137, 156, 215). Lint can't trace through the helper, so the gate is
+// invisible to it — suppress at the class level rather than littering call
+// sites with annotations.
+@SuppressLint("MissingPermission")
 class MonitorService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

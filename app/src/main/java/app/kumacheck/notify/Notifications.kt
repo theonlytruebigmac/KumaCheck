@@ -1,5 +1,6 @@
 package app.kumacheck.notify
 
+import android.annotation.SuppressLint
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -28,7 +29,6 @@ object Notifications {
     private const val PER_MONITOR_ID_OFFSET = 100_000
 
     fun ensureChannels(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val nm = context.getSystemService(NotificationManager::class.java) ?: return
 
         nm.createNotificationChannel(
@@ -320,6 +320,9 @@ object Notifications {
      * "Send test" Settings button to verify channels + permission in one tap.
      * Returns true if posted, false if permission missing.
      */
+    // hasPostPermission gate at the top of the function makes the nm.notify
+    // below safe; lint can't trace through the helper to see that.
+    @SuppressLint("MissingPermission")
     fun sendTest(context: Context): Boolean {
         ensureChannels(context)
         if (!hasPostPermission(context)) return false

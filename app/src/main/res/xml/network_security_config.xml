@@ -10,6 +10,7 @@
     only) — user-installed CAs are not trusted, so a malicious certificate
     sideloaded onto the device cannot MITM the connection.
 -->
-<network-security-config>
-    <base-config cleartextTrafficPermitted="true" />
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <base-config cleartextTrafficPermitted="true"
+        tools:ignore="InsecureBaseConfiguration" />
 </network-security-config>

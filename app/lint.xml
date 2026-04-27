@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<lint>
+    <!--
+        mipmap-anydpi-v26/ is the canonical AAPT2 location for adaptive
+        launcher icons; renaming to bare mipmap-anydpi/ breaks resource
+        resolution (AAPT can't find @mipmap/ic_launcher). The -v26 qualifier
+        looks redundant given minSdk=26, but it isn't — keep it and silence
+        the suggestion for this one path.
+    -->
+    <issue id="ObsoleteSdkInt">
+        <ignore path="src/main/res/mipmap-anydpi-v26" />
+    </issue>
+</lint>

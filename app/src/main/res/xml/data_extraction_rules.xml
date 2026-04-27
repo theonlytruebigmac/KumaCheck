@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    KumaCheck stores an encrypted session token plus per-server preferences in
+    DataStore. We don't want either to ride along in cloud backups or
+    device-to-device transfers — the keystore-backed AES key won't be available
+    on the destination, and stale per-server state would resurrect deleted
+    servers. Both transports are fully disabled here.
+
+    Pre-Android-12 devices honour `android:allowBackup="false"` in the manifest
+    instead; this file covers Android 12+.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </device-transfer>
+</data-extraction-rules>

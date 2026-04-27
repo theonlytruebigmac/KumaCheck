@@ -87,9 +87,9 @@ private fun DrawScope.drawKumaMark(
     // Mouth — two quadratic curves from (100,124) down to (92,134) and (108,134)
     val mouthPath = Path().apply {
         moveTo(p(100f), p(124f))
-        quadraticBezierTo(p(100f), p(134f), p(92f), p(134f))
+        quadraticTo(p(100f), p(134f), p(92f), p(134f))
         moveTo(p(100f), p(124f))
-        quadraticBezierTo(p(100f), p(134f), p(108f), p(134f))
+        quadraticTo(p(100f), p(134f), p(108f), p(134f))
     }
     drawPath(
         mouthPath,

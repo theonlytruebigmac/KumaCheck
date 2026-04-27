@@ -408,8 +408,7 @@ private fun NotificationsCard(
         }
     }
 
-    val openAppNotificationSettings = open@{
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return@open
+    val openAppNotificationSettings = {
         val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
             .putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

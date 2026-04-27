@@ -15,7 +15,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import app.kumacheck.data.auth.ThemeMode
@@ -23,7 +22,6 @@ import app.kumacheck.notify.Notifications
 import app.kumacheck.ui.AppNav
 import app.kumacheck.ui.common.ProvideTickingNow
 import app.kumacheck.ui.theme.KumaTheme
-import app.kumacheck.ui.theme.LocalKumaColors
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -58,14 +56,13 @@ class MainActivity : ComponentActivity() {
                 ThemeMode.SYSTEM -> systemDark
             }
             KumaTheme(useDark = useDark) {
-                // Tint the system bars to match the active palette and flip
-                // status-/nav-bar icon mode (light icons on dark bg, dark on light).
+                // Flip status-/nav-bar icon mode (light icons on dark bg, dark
+                // on light). Bar backgrounds are transparent under edgeToEdge —
+                // the cream Surface below shows through. Setting
+                // window.statusBarColor / navigationBarColor is deprecated as
+                // of API 35 and is a no-op on Android 15+.
                 val view = LocalView.current
-                val colors = LocalKumaColors.current
                 SideEffect {
-                    val window = window
-                    window.statusBarColor = colors.background.toArgb()
-                    window.navigationBarColor = colors.background.toArgb()
                     val controller = WindowCompat.getInsetsController(window, view)
                     controller.isAppearanceLightStatusBars = !useDark
                     controller.isAppearanceLightNavigationBars = !useDark

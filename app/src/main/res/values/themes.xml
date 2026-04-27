@@ -16,7 +16,7 @@
 
         <!-- Override Android's bright-yellow autofilled highlight with a
              low-alpha terra so password-manager fills don't clash with the
-             cozy palette. (API 26+; older versions ignore.) -->
-        <item name="android:autofilledHighlight" tools:targetApi="o">@color/kuma_terra_low</item>
+             cozy palette. -->
+        <item name="android:autofilledHighlight">@color/kuma_terra_low</item>
     </style>
 </resources>

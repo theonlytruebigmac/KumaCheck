@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -31,7 +32,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
-import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -234,6 +234,7 @@ private fun DownHero(
 ) {
     val accent = if (isOngoing) KumaDown else KumaUp
     val accentBg = if (isOngoing) KumaDownBg else KumaUpBg
+    val locale = LocalConfiguration.current.locales[0]
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(KumaCardCorner),
@@ -268,7 +269,7 @@ private fun DownHero(
                     )
                     if (lastSeenMs != null) {
                         Text(
-                            "Last seen ${SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(lastSeenMs))}",
+                            "Last seen ${SimpleDateFormat("HH:mm:ss", locale).format(Date(lastSeenMs))}",
                             color = accent.copy(alpha = 0.75f),
                             fontFamily = KumaMono,
                             fontSize = 11.sp,
@@ -295,6 +296,7 @@ private fun DownHero(
 
 @Composable
 private fun TimelineRow(event: IncidentDetailViewModel.TimelineEvent, isLast: Boolean) {
+    val locale = LocalConfiguration.current.locales[0]
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Column(
             modifier = Modifier.width(20.dp),
@@ -317,7 +319,7 @@ private fun TimelineRow(event: IncidentDetailViewModel.TimelineEvent, isLast: Bo
                 fontWeight = FontWeight.Medium,
                 fontSize = 13.sp,
             )
-            val timeStr = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(event.timestamp))
+            val timeStr = SimpleDateFormat("HH:mm", locale).format(Date(event.timestamp))
             val sub = listOfNotNull(timeStr, event.sub).joinToString(" · ")
             Text(
                 sub,
