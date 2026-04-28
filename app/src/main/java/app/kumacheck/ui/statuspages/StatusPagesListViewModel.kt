@@ -34,6 +34,23 @@ class StatusPagesListViewModel(
     private var giveUpJob: Job? = null
 
     init {
+        // V5: assign giveUpJob FIRST, then launch the success-listening
+        // coroutines. Pre-fix, `giveUpJob?.cancel()` ran inside two earlier
+        // `launch` blocks before `giveUpJob = …` was assigned. The race was
+        // theoretical (init is synchronous, dispatcher work is queued) but
+        // a refactor swapping execution order would silently break the
+        // cancel — now the cancel always sees a non-null reference.
+        giveUpJob = viewModelScope.launch {
+            delay(GIVE_UP_TIMEOUT_MS)
+            if (_state.value.isLoading) {
+                _state.update {
+                    it.copy(
+                        isLoading = false,
+                        error = "Server didn't return any status pages — pull to refresh once you're connected.",
+                    )
+                }
+            }
+        }
         // Kuma 2.x pushes `statusPageList` once after auth — observe the flow
         // for that path AND for any later live updates.
         viewModelScope.launch {
@@ -64,17 +81,6 @@ class StatusPagesListViewModel(
                         }
                     }
                 }
-        }
-        giveUpJob = viewModelScope.launch {
-            delay(GIVE_UP_TIMEOUT_MS)
-            if (_state.value.isLoading) {
-                _state.update {
-                    it.copy(
-                        isLoading = false,
-                        error = "Server didn't return any status pages — pull to refresh once you're connected.",
-                    )
-                }
-            }
         }
     }
 

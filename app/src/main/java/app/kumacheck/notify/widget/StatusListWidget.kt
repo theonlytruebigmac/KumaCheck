@@ -51,6 +51,7 @@ class StatusListWidget : GlanceAppWidget() {
 
 @Composable
 private fun ListContent(state: Preferences) {
+    val palette = WidgetPalette.current()
     val total = state[SnapshotWriter.KEY_TOTAL] ?: 0
     val up = state[SnapshotWriter.KEY_UP] ?: 0
     val down = state[SnapshotWriter.KEY_DOWN] ?: 0
@@ -62,7 +63,7 @@ private fun ListContent(state: Preferences) {
     Box(
         modifier = GlanceModifier
             .fillMaxSize()
-            .background(WidgetColors.CREAM_2)
+            .background(palette.cream2)
             .padding(8.dp)
             .clickable(actionStartActivity<MainActivity>()),
     ) {
@@ -70,7 +71,7 @@ private fun ListContent(state: Preferences) {
             modifier = GlanceModifier
                 .fillMaxSize()
                 .cornerRadius(20.dp)
-                .background(Color.White)
+                .background(palette.surface())
                 .padding(14.dp),
         ) {
             Column(modifier = GlanceModifier.defaultWeight()) {
@@ -85,7 +86,7 @@ private fun ListContent(state: Preferences) {
                     Text(
                         "KumaCheck",
                         style = TextStyle(
-                            color = ColorProvider(WidgetColors.INK),
+                            color = ColorProvider(palette.ink),
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Medium,
                         ),
@@ -95,7 +96,7 @@ private fun ListContent(state: Preferences) {
                 Text(
                     "$up up · $down down".uppercase(),
                     style = TextStyle(
-                        color = ColorProvider(WidgetColors.SLATE),
+                        color = ColorProvider(palette.slate),
                         fontSize = 9.sp,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Medium,
@@ -105,21 +106,21 @@ private fun ListContent(state: Preferences) {
                 Text(
                     percent,
                     style = TextStyle(
-                        color = ColorProvider(WidgetColors.INK),
+                        color = ColorProvider(palette.ink),
                         fontSize = 26.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
                     ),
                 )
                 Spacer(GlanceModifier.defaultWeight())
-                StatusGrid(up = up, warn = maintenance, down = down, total = total, cells = 24)
+                StatusGrid(up = up, warn = maintenance, down = down, total = total, cells = 24, palette = palette)
             }
             Spacer(GlanceModifier.width(10.dp))
             Box(
                 modifier = GlanceModifier
                     .width(1.dp)
                     .fillMaxHeight()
-                    .background(WidgetColors.HAIRLINE),
+                    .background(palette.hairline),
             ) {}
             Spacer(GlanceModifier.width(10.dp))
             Column(modifier = GlanceModifier.defaultWeight()) {
@@ -128,12 +129,12 @@ private fun ListContent(state: Preferences) {
                     Text(
                         "Open the app to connect",
                         style = TextStyle(
-                            color = ColorProvider(WidgetColors.SLATE),
+                            color = ColorProvider(palette.slate),
                             fontSize = 11.sp,
                         ),
                     )
                 } else {
-                    ranked.forEach { row -> WidgetRow(row) }
+                    ranked.forEach { row -> WidgetRow(row, palette) }
                 }
             }
         }
@@ -149,13 +150,13 @@ private fun rank(s: MonitorStatus): Int = when (s) {
 }
 
 @Composable
-private fun WidgetRow(row: StatusSnapshot.Row) {
+private fun WidgetRow(row: StatusSnapshot.Row, palette: WidgetPalette) {
     val color = when (row.status) {
-        MonitorStatus.UP -> WidgetColors.UP
-        MonitorStatus.DOWN -> WidgetColors.DOWN
-        MonitorStatus.PENDING -> WidgetColors.WARN
-        MonitorStatus.MAINTENANCE -> WidgetColors.SLATE
-        MonitorStatus.UNKNOWN -> WidgetColors.SLATE
+        MonitorStatus.UP -> palette.up
+        MonitorStatus.DOWN -> palette.down
+        MonitorStatus.PENDING -> palette.warn
+        MonitorStatus.MAINTENANCE -> palette.slate
+        MonitorStatus.UNKNOWN -> palette.slate
     }
     Row(
         modifier = GlanceModifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -172,7 +173,7 @@ private fun WidgetRow(row: StatusSnapshot.Row) {
             row.name,
             maxLines = 1,
             style = TextStyle(
-                color = ColorProvider(WidgetColors.INK),
+                color = ColorProvider(palette.ink),
                 fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace,
             ),

@@ -7,7 +7,12 @@ import org.junit.Test
 
 class RelativeTimeTest {
 
-    @get:Rule val tzRule = TimeZoneRule()
+    // T5: pin to a non-UTC zone so the "Z-suffix is UTC regardless of
+    // default" assertion below is meaningful. Other tests in this class
+    // are TZ-independent. The rule's finally is what guarantees
+    // restoration on test timeout — the previous in-test try/finally
+    // could leak global state across the JVM if killed.
+    @get:Rule val tzRule = TimeZoneRule(java.util.TimeZone.getTimeZone("America/Chicago"))
 
     private val now = 1_700_000_000_000L
 
@@ -28,14 +33,52 @@ class RelativeTimeTest {
     }
 
     @Test fun `parses iso 8601 with Z suffix as UTC regardless of default TZ`() {
-        // 2024-03-15T10:30:00Z == 1_710_498_600_000 ms epoch
-        val previous = java.util.TimeZone.getDefault()
+        // 2024-03-15T10:30:00Z == 1_710_498_600_000 ms epoch.
+        // Default TZ is Chicago via the class-level rule; if the parser
+        // honoured it instead of the explicit Z, the result would be off
+        // by Chicago's UTC offset.
+        assertEquals(1_710_498_600_000L, parseBeatTime("2024-03-15T10:30:00Z"))
+        assertEquals(1_710_498_600_123L, parseBeatTime("2024-03-15T10:30:00.123Z"))
+    }
+
+    @Test fun `parses naive iso 8601 against serverTimeZone when set`() {
+        // T3: pattern "yyyy-MM-dd'T'HH:mm:ss" (no Z, no offset). Kuma 1.x
+        // emits this shape and the parser must apply the server-reported
+        // timezone, not the device default. Without the serverTimeZone
+        // hook, a phone in Chicago reading a UTC server would mis-decode
+        // every beat by 5h.
         try {
-            java.util.TimeZone.setDefault(java.util.TimeZone.getTimeZone("America/Chicago"))
-            assertEquals(1_710_498_600_000L, parseBeatTime("2024-03-15T10:30:00Z"))
-            assertEquals(1_710_498_600_123L, parseBeatTime("2024-03-15T10:30:00.123Z"))
+            setServerTimeZone(java.util.TimeZone.getTimeZone("UTC"))
+            assertEquals(1_710_498_600_000L, parseBeatTime("2024-03-15T10:30:00"))
         } finally {
-            java.util.TimeZone.setDefault(previous)
+            setServerTimeZone(null)
+        }
+    }
+
+    @Test fun `parses kuma timestamp with millis`() {
+        // T3: pattern "yyyy-MM-dd HH:mm:ss.SSS" — non-UTC, server-tz.
+        try {
+            setServerTimeZone(java.util.TimeZone.getTimeZone("UTC"))
+            assertEquals(1_710_498_600_456L, parseBeatTime("2024-03-15 10:30:00.456"))
+        } finally {
+            setServerTimeZone(null)
+        }
+    }
+
+    @Test fun `naive timestamp respects serverTimeZone, not device default`() {
+        // T3: cross-check that the server-tz hook actually overrides the
+        // class-level Chicago default. Same wire string, different
+        // serverTimeZone → different epoch.
+        try {
+            setServerTimeZone(java.util.TimeZone.getTimeZone("UTC"))
+            val utc = parseBeatTime("2024-03-15 10:30:00")!!
+            setServerTimeZone(java.util.TimeZone.getTimeZone("America/New_York"))
+            val ny = parseBeatTime("2024-03-15 10:30:00")!!
+            // NY is UTC-4 in March (after DST), so the same wall-clock
+            // string is 4h later in epoch ms when interpreted as NY.
+            assertEquals(4 * 60 * 60_000L, ny - utc)
+        } finally {
+            setServerTimeZone(null)
         }
     }
 

@@ -50,16 +50,17 @@ class StatusTileWidget : GlanceAppWidget() {
 
 @Composable
 private fun TileContent(state: Preferences) {
+    val palette = WidgetPalette.current()
     val total = state[SnapshotWriter.KEY_TOTAL] ?: 0
     val up = state[SnapshotWriter.KEY_UP] ?: 0
     val down = state[SnapshotWriter.KEY_DOWN] ?: 0
     val maintenance = state[SnapshotWriter.KEY_MAINTENANCE] ?: 0
 
     val accent = when {
-        total == 0 -> WidgetColors.SLATE
-        down > 0 -> WidgetColors.DOWN
-        maintenance > 0 -> WidgetColors.WARN
-        else -> WidgetColors.UP
+        total == 0 -> palette.slate
+        down > 0 -> palette.down
+        maintenance > 0 -> palette.warn
+        else -> palette.up
     }
     val eyebrow = when {
         total == 0 -> "Waiting"
@@ -72,7 +73,7 @@ private fun TileContent(state: Preferences) {
     Box(
         modifier = GlanceModifier
             .fillMaxSize()
-            .background(WidgetColors.CREAM_2)
+            .background(palette.cream2)
             .padding(8.dp)
             .clickable(actionStartActivity<MainActivity>()),
     ) {
@@ -80,7 +81,9 @@ private fun TileContent(state: Preferences) {
             modifier = GlanceModifier
                 .fillMaxSize()
                 .cornerRadius(20.dp)
-                .background(Color.White)
+                // Inner surface tracks dark mode too — a literal white card
+                // on a dark cream2 outer background looks broken.
+                .background(palette.surface())
                 .padding(14.dp),
         ) {
             Row(
@@ -105,7 +108,7 @@ private fun TileContent(state: Preferences) {
             Text(
                 eyebrow.uppercase(),
                 style = TextStyle(
-                    color = ColorProvider(WidgetColors.SLATE),
+                    color = ColorProvider(palette.slate),
                     fontSize = 9.sp,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Medium,
@@ -115,7 +118,7 @@ private fun TileContent(state: Preferences) {
             Text(
                 countText,
                 style = TextStyle(
-                    color = ColorProvider(WidgetColors.INK),
+                    color = ColorProvider(palette.ink),
                     fontSize = 28.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace,
@@ -126,7 +129,7 @@ private fun TileContent(state: Preferences) {
             if (spark.isNotEmpty()) {
                 Sparkline(values = spark, accent = accent)
             } else {
-                StatusGrid(up = up, warn = maintenance, down = down, total = total, cells = 16)
+                StatusGrid(up = up, warn = maintenance, down = down, total = total, cells = 16, palette = palette)
             }
         }
     }
@@ -159,14 +162,21 @@ internal fun Sparkline(values: List<Int>, accent: Color) {
 }
 
 @Composable
-internal fun StatusGrid(up: Int, warn: Int, down: Int, total: Int, cells: Int) {
+internal fun StatusGrid(
+    up: Int,
+    warn: Int,
+    down: Int,
+    total: Int,
+    cells: Int,
+    palette: WidgetPalette = WidgetPalette.current(),
+) {
     if (total == 0) {
         Box(
             modifier = GlanceModifier
                 .fillMaxWidth()
                 .height(8.dp)
                 .cornerRadius(50.dp)
-                .background(WidgetColors.HAIRLINE),
+                .background(palette.hairline),
         ) {}
         return
     }
@@ -184,7 +194,7 @@ internal fun StatusGrid(up: Int, warn: Int, down: Int, total: Int, cells: Int) {
                     .defaultWeight()
                     .height(12.dp)
                     .cornerRadius(2.dp)
-                    .background(ColorProvider(WidgetColors.UP)),
+                    .background(palette.up),
             ) {}
         }
         repeat(warnCells) {
@@ -194,7 +204,7 @@ internal fun StatusGrid(up: Int, warn: Int, down: Int, total: Int, cells: Int) {
                     .defaultWeight()
                     .height(12.dp)
                     .cornerRadius(2.dp)
-                    .background(ColorProvider(WidgetColors.WARN)),
+                    .background(palette.warn),
             ) {}
         }
         repeat(downCells) {
@@ -204,18 +214,72 @@ internal fun StatusGrid(up: Int, warn: Int, down: Int, total: Int, cells: Int) {
                     .defaultWeight()
                     .height(12.dp)
                     .cornerRadius(2.dp)
-                    .background(ColorProvider(WidgetColors.DOWN)),
+                    .background(palette.down),
             ) {}
         }
     }
 }
 
-internal object WidgetColors {
-    val CREAM_2 = Color(0xFFF6ECDA)
-    val INK = Color(0xFF1F2A33)
-    val SLATE = Color(0xFF6B8696)
-    val UP = Color(0xFF3B8C5A)
-    val DOWN = Color(0xFFC0392B)
-    val WARN = Color(0xFFC77B22)
-    val HAIRLINE = Color(0x141F2A33)
+/**
+ * TH1: widget palette resolved at composable entry against the launcher
+ * process's `Configuration.uiMode`. Glance widgets render outside the
+ * app's `LocalKumaColors` provider, so we can't use the in-app palette
+ * directly — but `WidgetPalette.current()` reads `LocalContext` and
+ * picks light/dark for us. Resolve once at the top of each Content
+ * composable and thread the result into nested composables.
+ *
+ * Stays a flat `Color` palette (not Glance's `ColorProvider`) so
+ * [Sparkline]'s `.copy(alpha = …)` modulation, list-row tinting, etc.
+ * keep working without per-site rewrites.
+ */
+internal data class WidgetPalette(
+    val cream2: Color,
+    val ink: Color,
+    val slate: Color,
+    val up: Color,
+    val down: Color,
+    val warn: Color,
+    val hairline: Color,
+) {
+    /** Inner card surface — pure white in light mode, a dark slate-tinted
+     *  surface in dark mode. Derived rather than stored because it's the
+     *  only role-driven color and the choice is binary. */
+    fun surface(): Color = if (cream2.value.toLong() == Color(0xFFF6ECDA).value.toLong()) {
+        Color.White
+    } else Color(0xFF2A323B)
+
+    companion object {
+        // Light palette mirrors the original `WidgetColors` constants —
+        // KumaCream-aligned background, A1 (a11y) corrected honey for AA
+        // contrast on the cream2 surface.
+        private val Light = WidgetPalette(
+            cream2 = Color(0xFFF6ECDA),
+            ink = Color(0xFF1F2A33),
+            slate = Color(0xFF6B8696),
+            up = Color(0xFF3B8C5A),
+            down = Color(0xFFC0392B),
+            warn = Color(0xFFA86518),
+            hairline = Color(0x141F2A33),
+        )
+        // Dark palette mirrors `DarkKumaColors` from the in-app theme so
+        // the widget visually matches the running app when both are dark.
+        private val Dark = WidgetPalette(
+            cream2 = Color(0xFF1F262E),
+            ink = Color(0xFFE6EBF0),
+            slate = Color(0xFF8A9CAA),
+            up = Color(0xFF59B077),
+            down = Color(0xFFE05A4D),
+            warn = Color(0xFFE0A050),
+            hairline = Color(0x33E6EBF0),
+        )
+
+        @Composable
+        fun current(): WidgetPalette {
+            val ctx = androidx.glance.LocalContext.current
+            val isDark = (ctx.resources.configuration.uiMode and
+                android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+                android.content.res.Configuration.UI_MODE_NIGHT_YES
+            return if (isDark) Dark else Light
+        }
+    }
 }

@@ -12,7 +12,7 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,7 +30,7 @@ fun StatusPagesListScreen(
     onBack: () -> Unit,
     onPageTap: (String) -> Unit,
 ) {
-    val ui by vm.state.collectAsState()
+    val ui by vm.state.collectAsStateWithLifecycle()
 
     Scaffold(
         containerColor = KumaCream,
@@ -68,13 +68,14 @@ fun StatusPagesListScreen(
                 contentAlignment = Alignment.Center,
             ) { Text("Loading…", color = KumaSlate2, fontFamily = KumaFont) }
             ui.error != null -> Box(
-                modifier = Modifier.fillMaxSize().padding(padding),
+                modifier = Modifier.fillMaxSize().padding(padding).padding(24.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    ui.error!!,
-                    color = KumaDown,
-                    fontFamily = KumaFont,
+                // UX2: surface the error with a Retry affordance instead of
+                // forcing the user to navigate away and back.
+                app.kumacheck.ui.common.ErrorRetryRow(
+                    message = ui.error!!,
+                    onRetry = vm::refresh,
                 )
             }
             ui.pages.isEmpty() -> Box(
@@ -122,14 +123,14 @@ private fun StatusPageRow(page: StatusPage, onClick: () -> Unit) {
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp,
+                    fontSize = KumaTypography.bodyEmphasis,
                     maxLines = 1,
                 )
                 Text(
                     "/${page.slug}",
                     color = KumaSlate2,
                     fontFamily = KumaMono,
-                    fontSize = 11.sp,
+                    fontSize = KumaTypography.caption,
                 )
             }
             if (!page.published) {

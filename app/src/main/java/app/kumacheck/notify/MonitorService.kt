@@ -43,22 +43,13 @@ class MonitorService : Service() {
     private var notifiedJob: Job? = null
 
     /**
-     * Last status we posted a notification for, per monitor. Guards against
-     * duplicate alerts when an `important=true` heartbeat repeats the same
-     * status — happens occasionally on flap or after a server-side hiccup.
-     *
-     * Seeded from [KumaPrefs.notifiedStatusEntries] on connect / active-server
-     * switch (so the map survives process restarts), then mutated in place by
-     * the beats collector. Both paths take the [statusLock] mutex below so
-     * the seed-load's clear+populate can't interleave with a beat's
-     * check+update. ConcurrentHashMap.compute() looked sufficient initially
-     * but the prefs collector still does clear()+forEach as a non-atomic
-     * pair, so a beat racing through the empty window sees prev=null and
-     * fires a duplicate. Plain HashMap + synchronized is the simpler model
-     * once we accept that both writers contend.
+     * Q5 / O2: dedupe state extracted into [HeartbeatDedupe] so the
+     * three-state transition logic and the rollback contract can be
+     * unit-tested in pure JVM. The behaviour is identical to the previous
+     * inline `synchronized(statusLock) { lastNotifiedStatus.compute(…) }`
+     * pattern but the contract is now method-shaped.
      */
-    private val lastNotifiedStatus: HashMap<Int, MonitorStatus> = HashMap()
-    private val statusLock = Any()
+    private val dedupe = HeartbeatDedupe()
 
     /**
      * Live snapshot of "is the user signed in?" — gates notifications so a
@@ -110,10 +101,7 @@ class MonitorService : Service() {
                 // empty window between clear() and the first put would see
                 // prev=null and double-notify.
                 val decoded = entries.mapNotNull { decodeNotifiedEntry(it) }
-                synchronized(statusLock) {
-                    lastNotifiedStatus.clear()
-                    decoded.forEach { (id, status) -> lastNotifiedStatus[id] = status }
-                }
+                dedupe.seed(decoded.toMap())
             }
         }
 
@@ -165,17 +153,24 @@ class MonitorService : Service() {
                 // arriving concurrently can't both pass the check before
                 // either records the new state, and the seed-load's
                 // clear+populate can't slip in between our read and write.
-                val fire = synchronized(statusLock) {
-                    val prev = lastNotifiedStatus[hb.monitorId]
-                    if (prev == hb.status) {
-                        false
-                    } else {
-                        lastNotifiedStatus[hb.monitorId] = hb.status
-                        true
-                    }
-                }
-                if (!fire) return@collect
+                //
+                // Returns the captured prior state so a failed notify can
+                // roll the in-memory map back (O2):
+                //   null         → duplicate, skip
+                //   Some(null)   → first sighting (rollback = remove key)
+                //   Some(prev)   → was `prev` (rollback = restore prev)
+                //
+                // We use a tiny wrapper type since Kotlin's null can't
+                // distinguish "skip" from "first sighting was prev=null".
+                val captured = dedupe.claimTransition(hb.monitorId, hb.status) ?: return@collect
 
+                // O2: post AND persist; on failure roll the in-memory
+                // dedupe state back so the next beat retries this
+                // transition instead of getting silently deduped against
+                // a notification that never reached the user. Without
+                // the rollback, a transient notify failure would also
+                // reseed `lastNotifiedStatus` from stale disk on next
+                // service restart and fire a duplicate alert.
                 runCatching {
                     when (hb.status) {
                         MonitorStatus.DOWN ->
@@ -191,7 +186,10 @@ class MonitorService : Service() {
                         else -> {}
                     }
                     app.prefs.setNotifiedStatus(hb.monitorId, hb.status.name)
-                }.onFailure { Log.w(TAG, "notify failed", it) }
+                }.onFailure { t ->
+                    Log.w(TAG, "notify/persist failed; rolling back dedupe", t)
+                    dedupe.rollback(hb.monitorId, captured)
+                }
             }
         }
     }

@@ -8,14 +8,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,9 +42,40 @@ fun IncidentDetailScreen(
     vm: IncidentDetailViewModel,
     onBack: () -> Unit,
 ) {
-    val ui by vm.state.collectAsState()
+    val ui by vm.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val now = app.kumacheck.ui.common.LocalTickingNow.current.longValue
+    var confirmDelete by rememberSaveable { mutableStateOf(false) }
+    // Whether there's anything to delete on disk — true iff the displayed
+    // incident has a start (always true once parsed) or end timestamp the
+    // VM can match against the incident-log entries.
+    val hasDeletableEntries = ui.incidentStartMs != null || ui.incidentEndMs != null
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Delete this incident?") },
+            text = {
+                Text(
+                    "Removes the local log entry for this incident " +
+                        if (ui.incidentEndMs != null) "(both the down and recovery records)" else "(the down record)" +
+                        ". The live monitor itself isn't touched.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDelete = false
+                    scope.launch {
+                        vm.deleteIncidentEntries()
+                        onBack()
+                    }
+                }) { Text("Delete", color = KumaDown) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancel") }
+            },
+        )
+    }
 
     Scaffold(
         containerColor = KumaCream,
@@ -61,10 +95,22 @@ fun IncidentDetailScreen(
                             tint = KumaInk)
                     }
                 },
+                actions = {
+                    if (hasDeletableEntries) {
+                        IconButton(onClick = { confirmDelete = true }) {
+                            Icon(
+                                Icons.Filled.Delete,
+                                contentDescription = "Delete incident",
+                                tint = KumaDown,
+                            )
+                        }
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = KumaCream,
                     titleContentColor = KumaInk,
                     navigationIconContentColor = KumaInk,
+                    actionIconContentColor = KumaInk,
                 ),
             )
         },
@@ -95,7 +141,7 @@ fun IncidentDetailScreen(
                                     color = KumaSlate2,
                                     fontFamily = KumaFont,
                                     fontWeight = FontWeight.SemiBold,
-                                    fontSize = 14.sp,
+                                    fontSize = KumaTypography.bodyEmphasis,
                                 )
                             }
                         }
@@ -122,7 +168,7 @@ fun IncidentDetailScreen(
                                 "Acknowledge incident",
                                 fontFamily = KumaFont,
                                 fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp,
+                                fontSize = KumaTypography.bodyEmphasis,
                             )
                         }
                     }
@@ -199,7 +245,7 @@ private fun IncidentHeader(
                 color = labelColor,
                 fontFamily = KumaMono,
                 fontWeight = FontWeight.Bold,
-                fontSize = 10.sp,
+                fontSize = KumaTypography.captionSmall,
                 letterSpacing = 0.7.sp,
             )
         }
@@ -218,7 +264,7 @@ private fun IncidentHeader(
             sub,
             color = KumaSlate2,
             fontFamily = KumaMono,
-            fontSize = 12.sp,
+            fontSize = KumaTypography.captionLarge,
         )
     }
 }
@@ -265,14 +311,14 @@ private fun DownHero(
                         color = accent,
                         fontFamily = KumaFont,
                         fontWeight = FontWeight.SemiBold,
-                        fontSize = 14.sp,
+                        fontSize = KumaTypography.bodyEmphasis,
                     )
                     if (lastSeenMs != null) {
                         Text(
                             "Last seen ${SimpleDateFormat("HH:mm:ss", locale).format(Date(lastSeenMs))}",
                             color = accent.copy(alpha = 0.75f),
                             fontFamily = KumaMono,
-                            fontSize = 11.sp,
+                            fontSize = KumaTypography.caption,
                         )
                     }
                 }
@@ -317,7 +363,7 @@ private fun TimelineRow(event: IncidentDetailViewModel.TimelineEvent, isLast: Bo
                 color = KumaInk,
                 fontFamily = KumaFont,
                 fontWeight = FontWeight.Medium,
-                fontSize = 13.sp,
+                fontSize = KumaTypography.body,
             )
             val timeStr = SimpleDateFormat("HH:mm", locale).format(Date(event.timestamp))
             val sub = listOfNotNull(timeStr, event.sub).joinToString(" · ")
@@ -325,7 +371,7 @@ private fun TimelineRow(event: IncidentDetailViewModel.TimelineEvent, isLast: Bo
                 sub,
                 color = KumaSlate2,
                 fontFamily = KumaMono,
-                fontSize = 10.sp,
+                fontSize = KumaTypography.captionSmall,
             )
         }
     }

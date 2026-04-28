@@ -1,5 +1,7 @@
 package app.kumacheck.ui.login
 
+import app.kumacheck.ui.theme.KumaTypography
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -11,6 +13,7 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -43,7 +46,7 @@ fun LoginScreen(
     onAuthenticated: () -> Unit,
     onBack: (() -> Unit)? = null,
 ) {
-    val state by vm.state.collectAsState()
+    val state by vm.state.collectAsStateWithLifecycle()
     var passwordVisible by remember { mutableStateOf(false) }
     val keyboard = LocalSoftwareKeyboardController.current
 
@@ -79,7 +82,7 @@ fun LoginScreen(
                     "WELCOME",
                     color = KumaSlate2,
                     fontFamily = KumaMono,
-                    fontSize = 11.sp,
+                    fontSize = KumaTypography.caption,
                     letterSpacing = 0.6.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -97,7 +100,7 @@ fun LoginScreen(
             "Connect to your Uptime Kuma server.",
             color = KumaSlate2,
             fontFamily = KumaFont,
-            fontSize = 13.sp,
+            fontSize = KumaTypography.body,
         )
         Spacer(Modifier.height(8.dp))
 
@@ -115,7 +118,7 @@ fun LoginScreen(
                 "Cleartext (http://) — your password and session token will be sent unencrypted. OK on a trusted LAN; otherwise use https://.",
                 color = KumaDown,
                 fontFamily = KumaFont,
-                fontSize = 12.sp,
+                fontSize = KumaTypography.captionLarge,
             )
         }
         LoginField(
@@ -169,7 +172,7 @@ fun LoginScreen(
                 it,
                 color = KumaDown,
                 fontFamily = KumaFont,
-                fontSize = 12.sp,
+                fontSize = KumaTypography.captionLarge,
             )
         }
 
@@ -224,7 +227,7 @@ private fun LoginField(
         value = value,
         onValueChange = onChange,
         label = { Text(label, fontFamily = KumaFont) },
-        placeholder = placeholder?.let { { Text(it, color = KumaSlate2, fontFamily = KumaMono, fontSize = 13.sp) } },
+        placeholder = placeholder?.let { { Text(it, color = KumaSlate2, fontFamily = KumaMono, fontSize = KumaTypography.body) } },
         singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = imeAction),
         keyboardActions = KeyboardActions(onDone = { onDone?.invoke() }),

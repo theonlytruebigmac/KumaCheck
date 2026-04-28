@@ -1,11 +1,14 @@
 package app.kumacheck.ui.overview
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.TrendingDown
@@ -19,13 +22,16 @@ import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.kumacheck.R
 import app.kumacheck.data.model.MonitorState
 import app.kumacheck.data.model.MonitorStatus
 import app.kumacheck.data.socket.KumaSocket
@@ -47,8 +53,8 @@ fun OverviewScreen(
     onOpenSettings: () -> Unit,
     onMaintenanceTap: (Int) -> Unit,
 ) {
-    val ui by vm.state.collectAsState()
-    val isRefreshing by vm.isRefreshing.collectAsState()
+    val ui by vm.state.collectAsStateWithLifecycle()
+    val isRefreshing by vm.isRefreshing.collectAsStateWithLifecycle()
 
     var showPinPicker by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
     var heartbeatExpanded by rememberSaveable { mutableStateOf(false) }
@@ -61,6 +67,11 @@ fun OverviewScreen(
             ui.pinnedHeartbeats.isNotEmpty() -> ui.pinnedHeartbeats
             else -> ui.allHeartbeats.take(DEFAULT_HEARTBEAT_PREVIEW)
         }
+    }
+    // Build the id→response map once per snapshot (not per-item) so each
+    // lazy row's `responseById[id]` lookup is O(1).
+    val responseById = remember(ui.responseTimes) {
+        ui.responseTimes.associateBy { it.monitor.id }
     }
 
     PullToRefreshBox(
@@ -117,16 +128,35 @@ fun OverviewScreen(
                     )
                 }
             }
-            item {
-                Box(modifier = Modifier.padding(horizontal = 16.dp)) {
-                    MonitorListCard(
-                        rows = visibleHeartbeats,
-                        responses = ui.responseTimes,
-                        recentStatuses = ui.recentStatuses,
-                        nowMs = nowMs,
-                        onTap = onMonitorTap,
-                    )
-                }
+            // Lazy rows: each MonitorRow is its own LazyColumn item so
+            // off-screen rows aren't composed during scroll. Pre-fix, all
+            // ~67 rows were materialised inside a single non-lazy Column
+            // wrapped in one `item { ... }`, which forced Compose to
+            // measure + lay out the entire 67-row block whenever the
+            // parent recomposed. Now only the rows actually intersecting
+            // the viewport are composed.
+            //
+            // The card chrome is synthesised per row from
+            // `visibleHeartbeats.size` + index — top-rounded on first,
+            // bottom-rounded on last, flat in the middle — and the
+            // parent's `Arrangement.spacedBy(14.dp)` is overridden for
+            // these items via a negative top-padding so the rows visually
+            // butt up against each other inside one continuous "card."
+            itemsIndexed(
+                items = visibleHeartbeats,
+                key = { _, st -> "monitor-row-${st.monitor.id}" },
+            ) { idx, st ->
+                MonitorRowCardItem(
+                    state = st,
+                    pingMs = responseById[st.monitor.id]?.avgPingMs
+                        ?: st.lastHeartbeat?.ping?.takeIf { it.isFinite() && it >= 0 }?.toInt(),
+                    spark = responseById[st.monitor.id]?.recentPings.orEmpty(),
+                    recentStatuses = ui.recentStatuses[st.monitor.id].orEmpty(),
+                    nowMs = nowMs,
+                    isFirst = idx == 0,
+                    isLast = idx == visibleHeartbeats.lastIndex,
+                    onClick = { onMonitorTap(st.monitor.id) },
+                )
             }
             val totalCount = ui.allHeartbeats.size
             if (visibleHeartbeats.size < totalCount || heartbeatExpanded) {
@@ -146,7 +176,7 @@ fun OverviewScreen(
                             color = KumaTerra,
                             fontFamily = KumaMono,
                             fontWeight = FontWeight.SemiBold,
-                            fontSize = 12.sp,
+                            fontSize = KumaTypography.captionLarge,
                         )
                     }
                 }
@@ -187,7 +217,7 @@ private fun DashboardHeader(
     }
     val title = when {
         connection != KumaSocket.Connection.AUTHENTICATED && ui.total == 0 -> "Connecting…"
-        ui.down > 0 -> "${ui.down} ${if (ui.down == 1) "incident" else "incidents"}"
+        ui.down > 0 -> pluralStringResource(R.plurals.overview_incident_count, ui.down, ui.down)
         ui.maintenance > 0 -> "Heads up"
         ui.total == 0 -> "Waiting"
         else -> "All systems"
@@ -201,7 +231,7 @@ private fun DashboardHeader(
                 greeting,
                 color = KumaSlate2,
                 fontFamily = KumaMono,
-                fontSize = 11.sp,
+                fontSize = KumaTypography.caption,
                 letterSpacing = 0.6.sp,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -211,7 +241,7 @@ private fun DashboardHeader(
                 color = KumaInk,
                 fontFamily = KumaFont,
                 fontWeight = FontWeight.Bold,
-                fontSize = 28.sp,
+                fontSize = KumaTypography.display,
                 letterSpacing = (-0.6).sp,
             )
         }
@@ -252,7 +282,7 @@ private fun HeroStatusCard(
     val baseLabel = when {
         ui.total == 0 && connection != KumaSocket.Connection.AUTHENTICATED -> "Connecting…"
         ui.total == 0 -> "No monitors"
-        isDown -> "${ui.down} ${if (ui.down == 1) "incident" else "incidents"}"
+        isDown -> pluralStringResource(R.plurals.overview_incident_count, ui.down, ui.down)
         isWarn -> "${ui.maintenance} maintenance"
         else -> "All systems operational"
     }
@@ -277,7 +307,7 @@ private fun HeroStatusCard(
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 13.sp,
+                    fontSize = KumaTypography.body,
                 )
                 if (ui.recentIncidents.isNotEmpty() && isDown) {
                     Spacer(Modifier.width(8.dp))
@@ -285,7 +315,7 @@ private fun HeroStatusCard(
                         "·  just now",
                         color = KumaSlate2,
                         fontFamily = KumaMono,
-                        fontSize = 11.sp,
+                        fontSize = KumaTypography.caption,
                     )
                 }
             }
@@ -334,7 +364,14 @@ private fun StatTile(
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
+            // A2 (a11y): explicit Role.Button + onClickLabel so TalkBack
+            // announces "Filter to <label>, button" rather than just
+            // reading the value + label without indicating tappability.
+            .clickable(
+                onClick = onClick,
+                onClickLabel = "Filter monitors to $label",
+                role = androidx.compose.ui.semantics.Role.Button,
+            )
             .padding(vertical = 4.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -343,14 +380,14 @@ private fun StatTile(
             color = accent,
             fontFamily = KumaMono,
             fontWeight = FontWeight.SemiBold,
-            fontSize = 28.sp,
+            fontSize = KumaTypography.display,
             letterSpacing = (-0.5).sp,
         )
         Text(
             label,
             color = KumaSlate2,
             fontFamily = KumaMono,
-            fontSize = 10.sp,
+            fontSize = KumaTypography.captionSmall,
             letterSpacing = 0.6.sp,
             modifier = Modifier.padding(top = 4.dp),
         )
@@ -371,7 +408,7 @@ private fun MaintenanceBanner(m: KumaSocket.Maintenance, onClick: () -> Unit) {
                     "MAINTENANCE",
                     color = KumaSlate,
                     fontFamily = KumaMono,
-                    fontSize = 10.sp,
+                    fontSize = KumaTypography.captionSmall,
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.6.sp,
                 )
@@ -380,7 +417,7 @@ private fun MaintenanceBanner(m: KumaSocket.Maintenance, onClick: () -> Unit) {
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 13.sp,
+                    fontSize = KumaTypography.body,
                 )
             }
         }
@@ -431,7 +468,7 @@ private fun CertExpiryBanner(
                         if (hasInvalid) "CERT INVALID" else "CERT EXPIRING",
                         color = accent,
                         fontFamily = KumaMono,
-                        fontSize = 10.sp,
+                        fontSize = KumaTypography.captionSmall,
                         fontWeight = FontWeight.SemiBold,
                         letterSpacing = 0.6.sp,
                     )
@@ -440,14 +477,14 @@ private fun CertExpiryBanner(
                         color = KumaInk,
                         fontFamily = KumaFont,
                         fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
+                        fontSize = KumaTypography.body,
                     )
                     if (subline != null) {
                         Text(
                             subline,
                             color = KumaSlate2,
                             fontFamily = KumaFont,
-                            fontSize = 12.sp,
+                            fontSize = KumaTypography.captionLarge,
                         )
                     }
                 }
@@ -456,7 +493,11 @@ private fun CertExpiryBanner(
             // monitor case is handled by the card-level onClick above.
             if (warnings.size > 1) {
                 HorizontalDivider(color = KumaCardBorder, modifier = Modifier.padding(horizontal = 14.dp))
-                warnings.take(4).forEach { w ->
+                // C9: key by monitorId so a reordered or removed warning
+                // doesn't invalidate every row beneath it. Inline rows
+                // (not LazyColumn) still benefit from `key()` for state
+                // preservation across recompositions.
+                warnings.take(4).forEach { w -> androidx.compose.runtime.key(w.monitorId) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -468,7 +509,7 @@ private fun CertExpiryBanner(
                             w.monitorName,
                             color = KumaInk,
                             fontFamily = KumaFont,
-                            fontSize = 12.sp,
+                            fontSize = KumaTypography.captionLarge,
                             fontWeight = FontWeight.Medium,
                             modifier = Modifier.weight(1f),
                             maxLines = 1,
@@ -484,10 +525,10 @@ private fun CertExpiryBanner(
                             color = tagColor,
                             fontFamily = KumaMono,
                             fontWeight = FontWeight.SemiBold,
-                            fontSize = 11.sp,
+                            fontSize = KumaTypography.caption,
                         )
                     }
-                }
+                } }
             }
         }
     }
@@ -504,7 +545,9 @@ private fun MonitorListCard(
     val responseById = remember(responses) { responses.associateBy { it.monitor.id } }
     KumaCard {
         Column {
-            rows.forEachIndexed { idx, st ->
+            // C9: key by monitor id so a reordered list doesn't drop
+            // remembered state on every row underneath the change.
+            rows.forEachIndexed { idx, st -> androidx.compose.runtime.key(st.monitor.id) {
                 MonitorRow(
                     state = st,
                     pingMs = responseById[st.monitor.id]?.avgPingMs
@@ -517,7 +560,41 @@ private fun MonitorListCard(
                 if (idx != rows.lastIndex) {
                     HorizontalDivider(color = KumaCardBorder, modifier = Modifier.padding(start = 16.dp))
                 }
-            }
+            } }
+        }
+    }
+}
+
+/**
+ * Per-row card item used by the LazyColumn on Overview. Each row is its own
+ * self-contained KumaCard so the LazyColumn's `Arrangement.spacedBy` simply
+ * works between them — every row gets the same visual gap, no
+ * synthesised-corner trickery, no `offset(y = -14.dp)` (which only shifts
+ * paint, not layout, so it produced a "first two touch / rest have gaps"
+ * artifact). Trades the "single continuous card" look for consistent
+ * spacing — same visual as the dedicated Monitors tab.
+ */
+@Composable
+private fun MonitorRowCardItem(
+    state: MonitorState,
+    pingMs: Int?,
+    spark: List<Double>,
+    recentStatuses: List<MonitorStatus>,
+    nowMs: Long,
+    @Suppress("UNUSED_PARAMETER") isFirst: Boolean,
+    @Suppress("UNUSED_PARAMETER") isLast: Boolean,
+    onClick: () -> Unit,
+) {
+    Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+        KumaCard(onClick = onClick) {
+            MonitorRow(
+                state = state,
+                pingMs = pingMs,
+                spark = spark,
+                recentStatuses = recentStatuses,
+                nowMs = nowMs,
+                onClick = onClick,
+            )
         }
     }
 }
@@ -546,11 +623,18 @@ private fun MonitorRow(
                 color = KumaInk,
                 fontFamily = KumaFont,
                 fontWeight = FontWeight.Medium,
-                fontSize = 13.sp,
+                fontSize = KumaTypography.body,
                 maxLines = 1,
             )
             Spacer(Modifier.height(1.dp))
-            val ago = parseBeatTime(state.lastHeartbeat?.time)?.let { relativeTime(it, nowMs) }
+            // Per-tick cost reduction: prefer the heartbeat's pre-parsed
+            // `timeMs` (set once at ingest, P2). Falls back to a memoised
+            // SimpleDateFormat parse keyed on the raw string for older
+            // heartbeats whose ingest path didn't populate timeMs.
+            val hb = state.lastHeartbeat
+            val timeMs = hb?.timeMs
+                ?: remember(hb?.time) { parseBeatTime(hb?.time) }
+            val ago = timeMs?.let { relativeTime(it, nowMs) }
             val subtitle = listOfNotNull(
                 state.monitor.type.uppercase(),
                 state.monitor.hostname,
@@ -560,7 +644,7 @@ private fun MonitorRow(
                 subtitle,
                 color = KumaSlate2,
                 fontFamily = KumaMono,
-                fontSize = 10.sp,
+                fontSize = KumaTypography.captionSmall,
                 maxLines = 1,
             )
         }
@@ -588,7 +672,7 @@ private fun MonitorRow(
                 color = KumaInk,
                 fontFamily = KumaMono,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 11.sp,
+                fontSize = KumaTypography.caption,
                 modifier = Modifier.widthIn(min = 38.dp),
             )
         } else if (recentStatuses.isNotEmpty()) {
@@ -606,7 +690,7 @@ private fun MonitorRow(
                 color = KumaInk,
                 fontFamily = KumaMono,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 11.sp,
+                fontSize = KumaTypography.caption,
                 modifier = Modifier.widthIn(min = 38.dp),
             )
         } else {
@@ -616,7 +700,7 @@ private fun MonitorRow(
                 color = KumaSlate2,
                 fontFamily = KumaMono,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 11.sp,
+                fontSize = KumaTypography.caption,
                 modifier = Modifier.widthIn(min = 38.dp),
             )
         }
@@ -708,14 +792,14 @@ private fun IncidentRow(inc: OverviewViewModel.Incident, nowMs: Long, onClick: (
                 color = KumaInk,
                 fontFamily = KumaFont,
                 fontWeight = FontWeight.Medium,
-                fontSize = 13.sp,
+                fontSize = KumaTypography.body,
                 maxLines = 1,
             )
             Text(
                 if (isUp) "Recovered" else (inc.msg?.takeIf { it.isNotBlank() } ?: "Down"),
                 color = KumaSlate2,
                 fontFamily = KumaMono,
-                fontSize = 10.sp,
+                fontSize = KumaTypography.captionSmall,
                 maxLines = 1,
             )
         }
@@ -723,7 +807,7 @@ private fun IncidentRow(inc: OverviewViewModel.Incident, nowMs: Long, onClick: (
             ago,
             color = KumaSlate2,
             fontFamily = KumaMono,
-            fontSize = 10.sp,
+            fontSize = KumaTypography.captionSmall,
         )
     }
 }

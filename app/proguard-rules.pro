@@ -2,10 +2,17 @@
 # Keeps reflection-using internals (Socket.IO, Moshi) intact under R8.
 
 # --- Socket.IO + Engine.IO ---
--keep class io.socket.** { *; }
--keep class com.github.nkzawa.** { *; }
+# CI2: scope the keep rules to the actual subpackages we link to
+# (io.socket:socket.io-client:2.1.2 ships `client` and `engineio.client`),
+# rather than blanket-keeping io.socket.**. The legacy
+# `com.github.nkzawa.**` rule used to cover the pre-2.x package; since this
+# project compiles only against the modern coordinate it is unreferenced
+# and was preventing R8 from shrinking the package. The targeted rules
+# below keep the reflectively-invoked Socket / IO / Ack / EngineIO public
+# API while letting R8 strip implementation classes the app never names.
+-keep class io.socket.client.** { *; }
+-keep class io.socket.engineio.client.** { *; }
 -dontwarn io.socket.**
--dontwarn com.github.nkzawa.**
 
 # OkHttp / Okio (transitive via Socket.IO).
 -dontwarn okhttp3.**

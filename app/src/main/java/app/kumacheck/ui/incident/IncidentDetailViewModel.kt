@@ -1,5 +1,7 @@
 package app.kumacheck.ui.incident
 
+import app.kumacheck.util.stateInVm
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.kumacheck.data.auth.KumaPrefs
@@ -69,7 +71,7 @@ class IncidentDetailViewModel(
         val base = compute(monitors[monitorId], recentBeats[monitorId].orEmpty(), now)
         val ackKey = base.incidentStartMs?.let { "${monitorId}_$it" }
         base.copy(acknowledged = ackKey != null && ackKey in ackSet)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
+    }.stateInVm(this, UiState())
 
     /**
      * Persist the current incident (per-monitor + per-start-time) as
@@ -83,12 +85,26 @@ class IncidentDetailViewModel(
         prefs.acknowledgeIncident(monitorId, start)
     }
 
+    /**
+     * Delete the persisted log entries for the displayed incident. Wipes
+     * both the DOWN start (`incidentStartMs`) and, when present, the UP
+     * recovery (`incidentEndMs`). Suspends until the prefs write commits
+     * so the caller can navigate back without the parent re-rendering a
+     * stale entry.
+     */
+    suspend fun deleteIncidentEntries() {
+        val s = state.value
+        val timestamps = listOfNotNull(s.incidentStartMs, s.incidentEndMs).toSet()
+        if (timestamps.isEmpty()) return
+        prefs.deleteIncidents(monitorId, timestamps)
+    }
+
     private fun compute(monitor: Monitor?, beats: List<Heartbeat>, now: Long): UiState {
         if (monitor == null || beats.isEmpty()) return UiState(monitor = monitor)
 
         // Beats are oldest-first.
         val parsed = beats.mapNotNull { hb ->
-            parseBeatTime(hb.time)?.let { ts -> hb to ts }
+            (hb.timeMs ?: parseBeatTime(hb.time))?.let { ts -> hb to ts }
         }.sortedBy { it.second }
         if (parsed.isEmpty()) return UiState(monitor = monitor)
 
@@ -114,10 +130,15 @@ class IncidentDetailViewModel(
         val incidentEndMs = if (isOngoing) null else parsed[streakEndIdx].second
         val incidentMsg = parsed[streakEndIdx].first.msg.takeIf { it.isNotBlank() }
 
-        // Last seen UP before the incident.
-        val lastSeenMs = (streakStartIdx - 1 downTo 0)
+        // Last seen UP before the incident. V3: capture the index in one
+        // scan and reuse it below — pre-fix the same range was walked twice
+        // (once via firstOrNull for the timestamp, once via first for the
+        // ping). The second scan was guarded by `lastSeenMs != null`, but
+        // the duplication invited a future refactor where the guard could
+        // be removed and `first` would throw NoSuchElementException.
+        val lastSeenIdx = (streakStartIdx - 1 downTo 0)
             .firstOrNull { parsed[it].first.status == MonitorStatus.UP }
-            ?.let { parsed[it].second }
+        val lastSeenMs = lastSeenIdx?.let { parsed[it].second }
 
         val downDurationMs = ((incidentEndMs ?: now) - incidentStartMs).coerceAtLeast(0)
 
@@ -159,9 +180,7 @@ class IncidentDetailViewModel(
                 sub = parsed[streakStartIdx].first.msg.takeIf { it.isNotBlank() },
             )
         )
-        if (lastSeenMs != null) {
-            val lastSeenIdx = (streakStartIdx - 1 downTo 0)
-                .first { parsed[it].first.status == MonitorStatus.UP }
+        if (lastSeenIdx != null && lastSeenMs != null) {
             val ping = parsed[lastSeenIdx].first.ping
             timeline.add(
                 TimelineEvent(

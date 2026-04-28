@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
 import app.kumacheck.R
 
 /**
@@ -71,7 +72,11 @@ val LightKumaColors = KumaColors(
     upBg = Color(0xFFE5F1E9),
     down = Color(0xFFC0392B),
     downBg = Color(0xFFF7E2DE),
-    warn = Color(0xFFC77B22),
+    // Darkened from #C77B22 → #A86518 for WCAG AA contrast against
+    // KumaWarnBg #FAEED5 — the prior pair was ~2.88:1 and failed the 3:1
+    // minimum for UI components (StatusBadge "Degraded", warning banners,
+    // incident chips). #A86518 lands at ~5.3:1.
+    warn = Color(0xFFA86518),
     warnBg = Color(0xFFFAEED5),
     paused = Color(0xFF6B8696),
     pausedBg = Color(0xFFE6ECEF),
@@ -174,6 +179,34 @@ val KumaMono: FontFamily = FontFamily(
     Font(R.font.geist_mono_semibold, FontWeight.SemiBold),
     Font(R.font.geist_mono_bold, FontWeight.Bold),
 )
+
+/**
+ * TH3: shared typography size tokens. Grep for `fontSize = ` across the
+ * UI shows ~25 inline sites with a small pool of recurring values
+ * (10 / 11 / 12 / 13 / 14 / 16 / 18 / 24 / 28 sp). New screens should
+ * reach for these names; older sites can migrate incrementally without
+ * blocking PRs.
+ */
+object KumaTypography {
+    /** Stat labels and small captions (e.g. "PINGED 12s ago"). */
+    val captionSmall = 10.sp
+    /** Default labels / monitor list metadata. */
+    val caption = 11.sp
+    /** Picker subheaders, secondary metadata. */
+    val captionLarge = 12.sp
+    /** Body — default text content. */
+    val body = 13.sp
+    /** Body emphasis / settings titles. */
+    val bodyEmphasis = 14.sp
+    /** Section headers / monitor names. */
+    val title = 16.sp
+    /** Sub-display headers. */
+    val titleLarge = 18.sp
+    /** Stat numbers (uptime %, ping ms). */
+    val statNumber = 24.sp
+    /** Top-of-screen titles (Overview "Good morning", etc.). */
+    val display = 28.sp
+}
 
 @Composable
 private fun lightScheme(c: KumaColors) = lightColorScheme(

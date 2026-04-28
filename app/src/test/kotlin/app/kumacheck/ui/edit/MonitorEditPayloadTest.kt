@@ -3,6 +3,7 @@ package app.kumacheck.ui.edit
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -180,6 +181,209 @@ class MonitorEditPayloadTest {
         val out = buildMonitorPayload(JSONObject(), form, "", isCreate = true)
         assertEquals("1.1.1.1", out.getString("hostname"))
         assertEquals(56, out.getInt("packetSize"))
+    }
+
+    @Test fun `non-http create payloads still seed accepted_statuscodes and notificationIDList`() {
+        // Regression: Kuma's server-side `add` handler iterates these
+        // arrays via `.every()` regardless of monitor type. A `ping`
+        // monitor that omits them server-crashes with "cannot read
+        // properties of undefined (reading 'every')". Defaults must be
+        // present even when the type-specific block doesn't touch them.
+        val form = MonitorEditViewModel.Form(
+            name = "Ping", type = "ping",
+            hostname = "1.1.1.1",
+        )
+        val out = buildMonitorPayload(JSONObject(), form, "", isCreate = true)
+        assertTrue(out.has("accepted_statuscodes"))
+        val codes = out.getJSONArray("accepted_statuscodes")
+        assertEquals(1, codes.length())
+        assertEquals("200-299", codes.getString(0))
+        assertTrue(out.has("notificationIDList"))
+        assertEquals(0, out.getJSONArray("notificationIDList").length())
+    }
+
+    @Test fun `port create payload also seeds the universal defaults`() {
+        val form = MonitorEditViewModel.Form(
+            name = "Port", type = "port",
+            hostname = "db.local", port = "5432",
+        )
+        val out = buildMonitorPayload(JSONObject(), form, "", isCreate = true)
+        assertTrue(out.has("accepted_statuscodes"))
+        assertTrue(out.has("notificationIDList"))
+    }
+
+    @Test fun `every create payload seeds conditions as an empty array`() {
+        // Regression: Kuma 2.x's `monitor.conditions` SQLite column is
+        // NOT NULL. The server's `add` handler does
+        // `monitor.conditions = JSON.stringify(monitor.conditions)` —
+        // undefined → JS undefined → SQL NULL → constraint violation
+        // ("NOT NULL constraint failed: monitor.conditions"). Verify
+        // every type ships an empty JSON array.
+        val types = listOf(
+            "http", "keyword", "json-query",
+            "ping", "tailscale-ping",
+            "port", "dns", "mqtt",
+            "grpc-keyword", "kafka-producer",
+        )
+        for (type in types) {
+            val form = MonitorEditViewModel.Form(name = "x", type = type)
+            val out = buildMonitorPayload(JSONObject(), form, "", isCreate = true)
+            assertTrue("conditions missing for $type", out.has("conditions"))
+            assertEquals(0, out.getJSONArray("conditions").length())
+        }
+    }
+
+    // Per-type required-field defaults — these prevent server-validated
+    // monitors that DOWN forever because a runtime check() unconditionally
+    // dereferences a field the user left blank.
+
+    @Test fun `port create defaults port to 80 when blank`() {
+        val form = MonitorEditViewModel.Form(
+            name = "P", type = "port", hostname = "h.example",
+        )
+        val out = buildMonitorPayload(JSONObject(), form, "", isCreate = true)
+        assertEquals(80, out.getInt("port"))
+    }
+
+    @Test fun `dns create defaults port + resolver type + resolver server`() {
+        val form = MonitorEditViewModel.Form(
+            name = "D", type = "dns", hostname = "example.com",
+        )
+        val out = buildMonitorPayload(JSONObject(), form, "", isCreate = true)
+        assertEquals(53, out.getInt("port"))
+        assertEquals("A", out.getString("dns_resolve_type"))
+        assertEquals("1.1.1.1", out.getString("dns_resolve_server"))
+    }
+
+    @Test fun `dns create preserves user-typed resolver values`() {
+        val form = MonitorEditViewModel.Form(
+            name = "D", type = "dns", hostname = "example.com", port = "853",
+            dnsResolveServer = "9.9.9.9", dnsResolveType = "AAAA",
+        )
+        val out = buildMonitorPayload(JSONObject(), form, "", isCreate = true)
+        assertEquals(853, out.getInt("port"))
+        assertEquals("AAAA", out.getString("dns_resolve_type"))
+        assertEquals("9.9.9.9", out.getString("dns_resolve_server"))
+    }
+
+    @Test fun `mqtt create defaults port to 1883 when blank`() {
+        val form = MonitorEditViewModel.Form(
+            name = "M", type = "mqtt", hostname = "broker.local", mqttTopic = "/health",
+        )
+        val out = buildMonitorPayload(JSONObject(), form, "", isCreate = true)
+        assertEquals(1883, out.getInt("port"))
+    }
+
+    // ---- validateRequiredTypeFields ----
+
+    private fun fieldsForType(type: String, mut: MonitorEditViewModel.Form.() -> MonitorEditViewModel.Form = { this }) =
+        MonitorEditViewModel.Form(name = "x", type = type).mut()
+
+    @Test fun `http requires url`() {
+        assertEquals("URL is required", validateRequiredTypeFields(fieldsForType("http")))
+        assertNull(validateRequiredTypeFields(fieldsForType("http") { copy(url = "https://h") }))
+    }
+
+    @Test fun `keyword requires url AND keyword`() {
+        assertEquals("URL is required", validateRequiredTypeFields(fieldsForType("keyword")))
+        assertEquals(
+            "Keyword is required",
+            validateRequiredTypeFields(fieldsForType("keyword") { copy(url = "https://h") }),
+        )
+        assertNull(
+            validateRequiredTypeFields(
+                fieldsForType("keyword") { copy(url = "https://h", keyword = "ok") },
+            ),
+        )
+    }
+
+    @Test fun `json-query requires url AND jsonPath`() {
+        assertEquals(
+            "JSON path is required",
+            validateRequiredTypeFields(fieldsForType("json-query") { copy(url = "https://h") }),
+        )
+    }
+
+    @Test fun `ping requires hostname`() {
+        assertEquals("Hostname is required", validateRequiredTypeFields(fieldsForType("ping")))
+        assertNull(validateRequiredTypeFields(fieldsForType("ping") { copy(hostname = "1.1.1.1") }))
+    }
+
+    @Test fun `tailscale-ping requires hostname`() {
+        assertEquals(
+            "Hostname is required",
+            validateRequiredTypeFields(fieldsForType("tailscale-ping")),
+        )
+    }
+
+    @Test fun `port requires hostname`() {
+        assertEquals("Hostname is required", validateRequiredTypeFields(fieldsForType("port")))
+    }
+
+    @Test fun `dns requires hostname`() {
+        assertEquals("Hostname is required", validateRequiredTypeFields(fieldsForType("dns")))
+    }
+
+    @Test fun `mqtt requires hostname AND topic`() {
+        assertEquals("Hostname is required", validateRequiredTypeFields(fieldsForType("mqtt")))
+        assertEquals(
+            "MQTT topic is required",
+            validateRequiredTypeFields(fieldsForType("mqtt") { copy(hostname = "broker.local") }),
+        )
+    }
+
+    @Test fun `grpc-keyword requires url, service, method, keyword`() {
+        assertEquals(
+            "gRPC URL is required",
+            validateRequiredTypeFields(fieldsForType("grpc-keyword")),
+        )
+        assertEquals(
+            "Service name is required",
+            validateRequiredTypeFields(
+                fieldsForType("grpc-keyword") { copy(grpcUrl = "grpc://h") },
+            ),
+        )
+        assertEquals(
+            "Method is required",
+            validateRequiredTypeFields(
+                fieldsForType("grpc-keyword") {
+                    copy(grpcUrl = "grpc://h", grpcServiceName = "S")
+                },
+            ),
+        )
+        assertEquals(
+            "Keyword is required",
+            validateRequiredTypeFields(
+                fieldsForType("grpc-keyword") {
+                    copy(grpcUrl = "grpc://h", grpcServiceName = "S", grpcMethod = "M")
+                },
+            ),
+        )
+    }
+
+    @Test fun `kafka-producer requires brokers, topic, message`() {
+        assertEquals(
+            "At least one broker is required",
+            validateRequiredTypeFields(fieldsForType("kafka-producer")),
+        )
+        assertEquals(
+            "Topic is required",
+            validateRequiredTypeFields(
+                fieldsForType("kafka-producer") { copy(kafkaProducerBrokers = "b1:9092") },
+            ),
+        )
+        assertEquals(
+            "Message is required",
+            validateRequiredTypeFields(
+                fieldsForType("kafka-producer") {
+                    copy(kafkaProducerBrokers = "b1:9092", kafkaProducerTopic = "t")
+                },
+            ),
+        )
+    }
+
+    @Test fun `unknown type defers to server`() {
+        assertNull(validateRequiredTypeFields(fieldsForType("rabbitmq")))
     }
 
     @Test fun `dns type writes resolver and record type`() {

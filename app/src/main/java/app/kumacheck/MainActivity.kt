@@ -10,7 +10,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -22,6 +22,7 @@ import app.kumacheck.notify.Notifications
 import app.kumacheck.ui.AppNav
 import app.kumacheck.ui.common.ProvideTickingNow
 import app.kumacheck.ui.theme.KumaTheme
+import app.kumacheck.ui.theme.PulseAlphaProvider
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -48,7 +49,7 @@ class MainActivity : ComponentActivity() {
             readMonitorIdFrom(intent)
         }
         setContent {
-            val mode by app.prefs.themeMode.collectAsState(initial = ThemeMode.SYSTEM)
+            val mode by app.prefs.themeMode.collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
             val systemDark = isSystemInDarkTheme()
             val useDark = when (mode) {
                 ThemeMode.LIGHT -> false
@@ -69,11 +70,19 @@ class MainActivity : ComponentActivity() {
                 }
                 Surface(modifier = Modifier.fillMaxSize()) {
                     ProvideTickingNow {
-                        AppNav(
-                            app = app,
-                            pendingMonitorId = { pendingMonitorId },
-                            onConsumeMonitorId = { pendingMonitorId = null },
-                        )
+                        // Single shared pulse-alpha state for every
+                        // StatusDot in the tree — see Kuma.kt's
+                        // [LocalPulseAlpha]. Pre-fix, every UP row in a
+                        // 60+ monitor list ran its own infinite alpha
+                        // animation, dominating the main thread during
+                        // scroll.
+                        PulseAlphaProvider {
+                            AppNav(
+                                app = app,
+                                pendingMonitorId = { pendingMonitorId },
+                                onConsumeMonitorId = { pendingMonitorId = null },
+                            )
+                        }
                     }
                 }
             }

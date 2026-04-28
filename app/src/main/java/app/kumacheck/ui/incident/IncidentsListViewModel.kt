@@ -1,5 +1,7 @@
 package app.kumacheck.ui.incident
 
+import app.kumacheck.util.stateInVm
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.kumacheck.data.auth.KumaPrefs
@@ -19,7 +21,7 @@ class IncidentsListViewModel(
 ) : ViewModel() {
 
     val incidents: StateFlow<List<IncidentLogEntry>> = prefs.incidentLog
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        .stateInVm(this, emptyList())
 
     fun clear() {
         viewModelScope.launch { prefs.clearIncidentLog() }

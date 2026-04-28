@@ -12,6 +12,7 @@ import app.kumacheck.data.model.IncidentLogEntry
 import app.kumacheck.data.model.MonitorStatus
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -566,6 +567,29 @@ class KumaPrefs(
         val activeId = resolveActiveId(p) ?: return@edit
         p[mutedKeyFor(activeId)] = ids.mapTo(HashSet()) { it.toString() }
     }
+    /**
+     * Atomic add/remove of a single id on the active server's pinned set.
+     * Use instead of `set...MonitorIds(set.first().toMutableSet().also { … })`
+     * — the read-then-write pattern races: two rapid toggles can drop a
+     * mutation when the second one writes a stale snapshot. This helper
+     * does the read-modify-write inside one `dataStore.edit` so the latest
+     * persisted value is always the basis for the update.
+     */
+    suspend fun togglePinnedMonitor(id: Int, pinned: Boolean) = ctx.dataStore.edit { p ->
+        val activeId = resolveActiveId(p) ?: return@edit
+        val key = pinnedKeyFor(activeId)
+        val cur = p[key] ?: emptySet()
+        val s = id.toString()
+        p[key] = if (pinned) cur + s else cur - s
+    }
+    /** See [togglePinnedMonitor]. Same atomicity reasoning. */
+    suspend fun toggleMutedMonitor(id: Int, muted: Boolean) = ctx.dataStore.edit { p ->
+        val activeId = resolveActiveId(p) ?: return@edit
+        val key = mutedKeyFor(activeId)
+        val cur = p[key] ?: emptySet()
+        val s = id.toString()
+        p[key] = if (muted) cur + s else cur - s
+    }
     /** Mark an incident (per-monitor + per-start-time) as acknowledged. */
     suspend fun acknowledgeIncident(monitorId: Int, startTimestampMs: Long) = ctx.dataStore.edit { p ->
         val activeId = resolveActiveId(p) ?: return@edit
@@ -596,6 +620,30 @@ class KumaPrefs(
     suspend fun clearIncidentLog() = ctx.dataStore.edit { p ->
         val activeId = resolveActiveId(p) ?: return@edit
         p.remove(incidentLogKeyFor(activeId))
+    }
+
+    /**
+     * Delete one or more incident log entries that exactly match the
+     * given (monitorId, timestampMs) tuples. No-op if none match. Used by
+     * the per-incident detail screen's delete action — passes both the
+     * DOWN start and (when present) the UP recovery timestamps so a
+     * single tap removes the whole incident pair.
+     */
+    suspend fun deleteIncidents(
+        monitorId: Int,
+        timestampsMs: Set<Long>,
+    ) = ctx.dataStore.edit { p ->
+        if (timestampsMs.isEmpty()) return@edit
+        val activeId = resolveActiveId(p) ?: return@edit
+        val key = incidentLogKeyFor(activeId)
+        val existing = decodeIncidentLog(p[key])
+        val pruned = existing.filterNot {
+            it.monitorId == monitorId && it.timestampMs in timestampsMs
+        }
+        if (pruned.size != existing.size) {
+            if (pruned.isEmpty()) p.remove(key)
+            else p[key] = encodeIncidentLog(pruned)
+        }
     }
 
     /**
@@ -637,6 +685,57 @@ class KumaPrefs(
                 mid in liveIds
             }
             if (pruned.size != cur.size) p[ackKey] = pruned
+        }
+        val pinnedKey = pinnedKeyFor(activeId)
+        p[pinnedKey]?.let { cur ->
+            val pruned = cur.filterTo(HashSet()) { (it.toIntOrNull() ?: -1) in liveIds }
+            if (pruned.size != cur.size) p[pinnedKey] = pruned
+        }
+        val incidentKey = incidentLogKeyFor(activeId)
+        p[incidentKey]?.let { cur ->
+            val existing = decodeIncidentLog(cur)
+            val pruned = existing.filter { it.monitorId in liveIds }
+            if (pruned.size != existing.size) {
+                if (pruned.isEmpty()) p.remove(incidentKey)
+                else p[incidentKey] = encodeIncidentLog(pruned)
+            }
+        }
+    }
+
+    /**
+     * Targeted single-monitor cleanup. Called from the
+     * `deleteMonitorFromList` push (and the explicit delete RPC's success
+     * path) so per-server state for the deleted monitor doesn't survive.
+     * Mirrors [pruneStaleMonitorIds] but operates on one id without
+     * needing a snapshot of the whole live set — the server-pushed
+     * delete event is authoritative.
+     */
+    suspend fun forgetMonitor(monitorId: Int) = ctx.dataStore.edit { p ->
+        val activeId = resolveActiveId(p) ?: return@edit
+        val idStr = monitorId.toString()
+        p[mutedKeyFor(activeId)]?.let { cur ->
+            if (idStr in cur) p[mutedKeyFor(activeId)] = cur - idStr
+        }
+        p[pinnedKeyFor(activeId)]?.let { cur ->
+            if (idStr in cur) p[pinnedKeyFor(activeId)] = cur - idStr
+        }
+        p[notifiedStatusKeyFor(activeId)]?.let { cur ->
+            val prefix = "$monitorId:"
+            val pruned = cur.filterNotTo(HashSet()) { it.startsWith(prefix) }
+            if (pruned.size != cur.size) p[notifiedStatusKeyFor(activeId)] = pruned
+        }
+        p[ackIncidentKeyFor(activeId)]?.let { cur ->
+            val prefix = "${monitorId}_"
+            val pruned = cur.filterNotTo(HashSet()) { it.startsWith(prefix) }
+            if (pruned.size != cur.size) p[ackIncidentKeyFor(activeId)] = pruned
+        }
+        p[incidentLogKeyFor(activeId)]?.let { cur ->
+            val existing = decodeIncidentLog(cur)
+            val pruned = existing.filter { it.monitorId != monitorId }
+            if (pruned.size != existing.size) {
+                if (pruned.isEmpty()) p.remove(incidentLogKeyFor(activeId))
+                else p[incidentLogKeyFor(activeId)] = encodeIncidentLog(pruned)
+            }
         }
     }
 
@@ -695,6 +794,10 @@ class KumaPrefs(
             list[idx] = list[idx].copy(username = null, token = null, rawToken = null)
             writeServers(p, list)
         }
+        // A different user may sign in next; drop per-server prefs so their
+        // pins / mutes / ack-incidents / notified-status from the prior
+        // session don't silently apply to the new account on the same URL.
+        purgePerServerKeys(p, activeId)
         p.remove(LEGACY_TOKEN)
         p.remove(LEGACY_USERNAME)
     }
@@ -768,15 +871,30 @@ class KumaPrefs(
     }
 
     /**
-     * Encrypts a plaintext token for storage. Falls back to plaintext if the
-     * keystore is unavailable — the fallback condition is observable via
-     * [tokensStoredPlaintext], which derives from the raw JSON each emission.
+     * Encrypts a plaintext token for storage. Returns null when the keystore
+     * is unavailable rather than persisting plaintext (S1) — the in-memory
+     * `ServerEntry.token` still works for the current session; on app
+     * restart the user simply has to sign in again. Persisting plaintext
+     * would leave the JWT readable to root / backup-extractor / any process
+     * with file access, which is exactly the threat the keystore wraps
+     * against.
      */
     private fun encodeTokenForStorage(plain: String?): String? {
         if (plain.isNullOrEmpty()) return null
         if (TokenCrypto.isEnvelope(plain)) return plain
-        return crypto.encrypt(plain) ?: plain
+        val encrypted = crypto.encrypt(plain)
+        if (encrypted == null) keystoreUnavailableForWrite.value = true
+        else keystoreUnavailableForWrite.value = false
+        return encrypted
     }
+
+    /**
+     * True iff the most recent attempt to encrypt a token for storage
+     * failed (Keystore transient unavailability). Surfaces a Settings
+     * banner so the user knows the next sign-in won't survive an app
+     * restart. Resets to false on the next successful encrypt.
+     */
+    val keystoreUnavailableForWrite = MutableStateFlow(false)
 
     private fun resolveActiveId(p: Preferences): Int? {
         val explicit = p[ACTIVE_SERVER_ID]
@@ -794,19 +912,34 @@ class KumaPrefs(
         // recovery flow) can copy it back manually.
         if (serversBlobIsCorrupt(p)) {
             val raw = p[SERVERS_JSON]
-            if (raw != null && p[SERVERS_JSON_BACKUP] == null) {
+            // P1: refresh the backup whenever the live blob is corrupt and
+            // differs from the existing backup. The original "only write if
+            // backup is null" guard meant a second corruption (after a
+            // recovery cycle) would silently keep the stale first-corruption
+            // backup, leaving recovery tools with old data.
+            if (raw != null && p[SERVERS_JSON_BACKUP] != raw) {
                 p[SERVERS_JSON_BACKUP] = raw
             }
         }
         val arr = JSONArray()
         list.forEach { e ->
-            // If `token` is null but we previously read a valid envelope from
-            // disk for this entry (decrypt was momentarily unavailable),
-            // persist the original envelope rather than blanking it. The
-            // explicit migration / clearToken / clearSession paths still work
-            // because they pass an entry whose `rawToken` is also null.
-            val toPersist = encodeTokenForStorage(e.token)
-                ?: e.rawToken?.takeIf { TokenCrypto.isEnvelope(it) }
+            val toPersist = if (e.token != null) {
+                // Caller has a new plaintext token to store. Try to encrypt;
+                // if Keystore is unavailable (S1), persist null rather than
+                // falling back to the stale `rawToken` envelope on disk —
+                // that would silently keep an old JWT around when the user
+                // believes they just stored a new one. The in-memory token
+                // remains usable for this session.
+                encodeTokenForStorage(e.token)
+            } else {
+                // No new token. If we previously read a valid envelope from
+                // disk for this entry (decrypt was momentarily unavailable),
+                // persist the original envelope rather than blanking it.
+                // The explicit migration / clearToken / clearSession paths
+                // still work because they pass an entry whose `rawToken` is
+                // also null.
+                e.rawToken?.takeIf { TokenCrypto.isEnvelope(it) }
+            }
             arr.put(e.copy(token = toPersist).toJson())
         }
         p[SERVERS_JSON] = arr.toString()

@@ -2,4 +2,8 @@
 <resources>
     <color name="kuma_cream">#FFF8EE</color>
     <color name="kuma_terra_low">#1FD97757</color>
+    <!-- Dark-mode window background — matches Theme.kt's DarkKumaColors `cream`
+         (#161B20). Used by values-night/themes.xml so cold-start / process-death
+         doesn't flash a cream bar on a dark-mode device. -->
+    <color name="kuma_ink_deep">#161B20</color>
 </resources>

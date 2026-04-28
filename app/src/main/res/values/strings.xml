@@ -1,7 +1,58 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">KumaCheck</string>
+
+    <!-- Widget descriptions (surfaced by the launcher's add-widget UI). -->
     <string name="widget_status_tile_description">Status tile — current up/down/maintenance counts at a glance.</string>
     <string name="widget_status_list_description">Monitor list — top problematic monitors with response times.</string>
     <string name="widget_status_micro_description">Status pulse — single-cell live status indicator.</string>
+
+    <!-- Q7: extracted strings. The audit's recommendation was to set up the
+         resource pattern even before a translation strategy lands; new
+         screens reach for `stringResource(R.string.X)` and existing
+         screens migrate when touched. -->
+
+    <!-- Common actions. -->
+    <string name="action_save">Save</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_edit">Edit</string>
+    <string name="action_back">Back</string>
+    <string name="action_remove">Remove</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_sign_out">Sign out</string>
+    <string name="action_sign_in">Sign in</string>
+    <string name="action_refresh">Refresh</string>
+    <string name="action_add_server">Add server</string>
+
+    <!-- Save snackbar (UX3). -->
+    <string name="save_success">Saved</string>
+
+    <!-- Splash phase labels (UX5). -->
+    <string name="splash_reading_prefs">Reading prefs…</string>
+    <string name="splash_connecting">Connecting…</string>
+    <string name="splash_authenticating">Authenticating…</string>
+    <string name="splash_signing_in">Signing in…</string>
+    <string name="splash_ready">Ready</string>
+    <string name="splash_retrying">Retrying…</string>
+
+    <!-- Settings banners. -->
+    <string name="settings_keystore_unavailable_title">Secure storage unavailable</string>
+    <string name="settings_keystore_unavailable_body">Your sign-in is held in memory but couldn\'t be encrypted to disk. It will be lost when the app restarts. Sign in again once your device\'s keystore is healthy.</string>
+    <string name="settings_cleartext_title">Cleartext server</string>
+    <string name="settings_cleartext_body">This server uses http:// over a non-private host. Your session token is sent unencrypted. Switch to https:// if you didn\'t intend this.</string>
+
+    <!-- Sign-out / remove dialogs (ST1). -->
+    <string name="settings_signout_title">Sign out?</string>
+    <string name="settings_signout_body">This clears the session token for the active server and stops the foreground monitor service. You\'ll need to sign in again next time.</string>
+    <string name="settings_remove_last_title">Remove your only server?</string>
+    <string name="settings_remove_last_body">This drops the server entry and signs you out — there are no other saved servers to fall back to.</string>
+    <string name="settings_remove_title">Remove this server?</string>
+
+    <!-- Maintenance edit (M3 / M4). -->
+    <string name="maintenance_load_parse_failed">Couldn\'t parse the saved start/end date — please re-enter before saving.</string>
+
+    <!-- Generic error fallbacks. -->
+    <string name="error_unknown">Unknown error</string>
+    <string name="error_server_rejected">Server rejected the change</string>
 </resources>

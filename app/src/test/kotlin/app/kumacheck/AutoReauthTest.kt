@@ -153,12 +153,47 @@ class AutoReauthTest {
         assertEquals(0, h.clearTokenCalls)
     }
 
+    @Test fun `expectedUrl is propagated to loginByToken`() = runTest(UnconfinedTestDispatcher()) {
+        // NW3 regression guard: the URL the active server's token belongs
+        // to must be passed through so AuthRepository.loginByToken can
+        // abort if a server-switch races with the LOGIN_REQUIRED edge.
+        val h = harness().apply {
+            token = "tok"
+            url = "https://kuma.example.com"
+        }
+        val job = launch { h.run() }
+        h.connection.value = KumaSocket.Connection.AUTHENTICATED
+        h.connection.value = KumaSocket.Connection.LOGIN_REQUIRED
+        job.cancel()
+        assertEquals(1, h.loginCalls)
+        assertEquals("tok", h.lastToken)
+        assertEquals("https://kuma.example.com", h.lastExpectedUrl)
+    }
+
+    @Test fun `LOGIN_REQUIRED with stored token but no URL skips loginByToken`() = runTest(UnconfinedTestDispatcher()) {
+        // Defensive: the auto-reauth callback must be all-or-nothing on
+        // (token, url). A token without a URL means the caller can't supply
+        // expectedUrl, so we'd be back to the pre-NW3 silent cross-server
+        // emit risk — skip the attempt.
+        val h = harness().apply {
+            token = "tok"
+            url = null
+        }
+        val job = launch { h.run() }
+        h.connection.value = KumaSocket.Connection.AUTHENTICATED
+        h.connection.value = KumaSocket.Connection.LOGIN_REQUIRED
+        job.cancel()
+        assertEquals(0, h.loginCalls)
+    }
+
     private class AutoReauthHarness {
         val connection = MutableStateFlow(KumaSocket.Connection.DISCONNECTED)
         var token: String? = null
+        var url: String? = "https://kuma.test"
         var throwOnLogin: Boolean = false
         var loginCalls: Int = 0
         var lastToken: String? = null
+        var lastExpectedUrl: String? = null
         var loginResult: AuthRepository.LoginResult? = null
         var clearTokenCalls: Int = 0
 
@@ -172,10 +207,15 @@ class AutoReauthTest {
 
         suspend fun run() = runAutoReauthLoop(
             connection = connection,
-            tokenOnce = { token },
-            loginByToken = { t ->
+            activeAuthOnce = {
+                val t = token
+                val u = url
+                if (t != null && u != null) t to u else null
+            },
+            loginByToken = { t, u ->
                 loginCalls++
                 lastToken = t
+                lastExpectedUrl = u
                 if (throwOnLogin) throw RuntimeException("simulated network failure")
                 loginResult ?: AuthRepository.LoginResult.Success(t)
             },

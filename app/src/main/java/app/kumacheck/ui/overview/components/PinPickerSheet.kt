@@ -81,7 +81,13 @@ fun PinPickerSheet(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(10.dp))
-                            .clickable { onTogglePin(m.id, !isPinned) }
+                            // A2 (a11y): explicit Role.Checkbox so TalkBack
+                            // announces the toggleable state alongside the
+                            // monitor name; onClickLabel describes the action.
+                            .clickable(
+                                onClickLabel = if (isPinned) "Unpin ${m.name}" else "Pin ${m.name}",
+                                role = androidx.compose.ui.semantics.Role.Checkbox,
+                            ) { onTogglePin(m.id, !isPinned) }
                             .padding(horizontal = 12.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {

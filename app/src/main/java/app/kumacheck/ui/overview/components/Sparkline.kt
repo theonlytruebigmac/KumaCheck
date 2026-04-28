@@ -2,8 +2,8 @@ package app.kumacheck.ui.overview.components
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -20,13 +20,20 @@ fun Sparkline(
     modifier: Modifier = Modifier,
     color: Color,
 ) {
+    // C8: filter once when the input list changes (NaN / infinity are
+    // dropped because Skia silently rejects path segments with NaN
+    // coordinates and leaves a half-rendered chart). Without `remember`
+    // this allocated a fresh ArrayList on every recomposition — and with
+    // 50+ sparklines on the overview that's a measurable per-frame churn
+    // on lower-end devices.
+    val cleaned = remember(points) { points.filter { it.isFinite() } }
+    // Reuse the same Path instance across draws — `path.reset()` reclaims
+    // the underlying segment buffer rather than allocating a new one.
+    val path = remember { Path() }
     Canvas(modifier) {
-        // Drop NaN / infinity inputs first — Skia silently rejects path
-        // segments with NaN coordinates, leaving a half-rendered chart.
-        val points = points.filter { it.isFinite() }
-        if (points.size < 2) return@Canvas
-        val minP = points.min()
-        val maxP = points.max()
+        if (cleaned.size < 2) return@Canvas
+        val minP = cleaned.min()
+        val maxP = cleaned.max()
         // If everything is the same, render a flat horizontal line in the middle.
         val flat = (maxP - minP) < 1e-9
         val range = if (flat) 1.0 else (maxP - minP)
@@ -36,9 +43,9 @@ fun Sparkline(
         val padBottom = 2.dp.toPx()
         val drawH = h - padTop - padBottom
 
-        val path = Path()
-        points.forEachIndexed { i, p ->
-            val x = if (points.size == 1) w / 2f else w * i / (points.size - 1)
+        path.reset()
+        cleaned.forEachIndexed { i, p ->
+            val x = if (cleaned.size == 1) w / 2f else w * i / (cleaned.size - 1)
             val y = if (flat) padTop + drawH / 2f
                 else padTop + drawH - ((p - minP) / range * drawH).toFloat()
             if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)

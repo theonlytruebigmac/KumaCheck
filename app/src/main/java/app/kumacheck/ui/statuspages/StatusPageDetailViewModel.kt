@@ -1,5 +1,7 @@
 package app.kumacheck.ui.statuspages
 
+import app.kumacheck.util.stateInVm
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.kumacheck.data.model.Monitor
@@ -85,7 +87,7 @@ class StatusPageDetailViewModel(
             isLoading = loading,
             error = error,
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
+    }.stateInVm(this, UiState())
 
     init { refresh() }
 
@@ -111,7 +113,12 @@ class StatusPageDetailViewModel(
     fun dismissError() = _error.update { null }
 
     /** Post a pinned incident on this status page. UI dismisses on success. */
-    fun postIncident(title: String, content: String, style: String, onDone: () -> Unit) {
+    fun postIncident(
+        title: String,
+        content: String,
+        style: app.kumacheck.data.model.IncidentStyle,
+        onDone: () -> Unit,
+    ) {
         viewModelScope.launch {
             val (ok, msg) = socket.postIncident(slug, title, content, style)
             if (ok) {

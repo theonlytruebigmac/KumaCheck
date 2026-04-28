@@ -48,16 +48,17 @@ class StatusMicroWidget : GlanceAppWidget() {
 
 @Composable
 private fun MicroContent(state: Preferences) {
+    val palette = WidgetPalette.current()
     val total = state[SnapshotWriter.KEY_TOTAL] ?: 0
     val up = state[SnapshotWriter.KEY_UP] ?: 0
     val down = state[SnapshotWriter.KEY_DOWN] ?: 0
     val maintenance = state[SnapshotWriter.KEY_MAINTENANCE] ?: 0
 
     val accent: Color = when {
-        total == 0 -> WidgetColors.SLATE
-        down > 0 -> WidgetColors.DOWN
-        maintenance > 0 -> WidgetColors.WARN
-        else -> WidgetColors.UP
+        total == 0 -> palette.slate
+        down > 0 -> palette.down
+        maintenance > 0 -> palette.warn
+        else -> palette.up
     }
     val label = when {
         total == 0 -> "—"
@@ -70,7 +71,7 @@ private fun MicroContent(state: Preferences) {
     Box(
         modifier = GlanceModifier
             .fillMaxSize()
-            .background(WidgetColors.CREAM_2)
+            .background(palette.cream2)
             .padding(6.dp)
             .clickable(actionStartActivity<MainActivity>()),
     ) {
@@ -78,7 +79,7 @@ private fun MicroContent(state: Preferences) {
             modifier = GlanceModifier
                 .fillMaxSize()
                 .cornerRadius(16.dp)
-                .background(Color.White)
+                .background(palette.surface())
                 .padding(8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -93,7 +94,7 @@ private fun MicroContent(state: Preferences) {
             Text(
                 label,
                 style = TextStyle(
-                    color = ColorProvider(WidgetColors.INK),
+                    color = ColorProvider(palette.ink),
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace,
@@ -102,7 +103,7 @@ private fun MicroContent(state: Preferences) {
             Text(
                 sub,
                 style = TextStyle(
-                    color = ColorProvider(WidgetColors.SLATE),
+                    color = ColorProvider(palette.slate),
                     fontSize = 8.sp,
                     fontFamily = FontFamily.Monospace,
                 ),

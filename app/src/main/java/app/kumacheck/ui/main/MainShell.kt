@@ -1,12 +1,25 @@
 package app.kumacheck.ui.main
 
+import app.kumacheck.ui.theme.KumaTypography
+
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.sp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Notifications
@@ -18,12 +31,19 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.flow.Flow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -56,6 +76,7 @@ fun MainShell(
     settingsVm: SettingsViewModel,
     incidentsVm: IncidentsListViewModel,
     connection: KumaSocket.Connection,
+    socketErrors: Flow<String>,
     onLoggedOut: () -> Unit,
     onMonitorTap: (Int) -> Unit,
     onIncidentTap: (Int) -> Unit,
@@ -70,9 +91,21 @@ fun MainShell(
 
     val onOpenSettings: () -> Unit = { tab = Tab.SETTINGS }
 
+    // O1: surface socket-level errors (connect failures, etc.) as a
+    // transient snackbar so they don't vanish into the SharedFlow void.
+    // Hosted at the shell level so any tab can see them; transient
+    // duration so the message doesn't camp on screen indefinitely.
+    val snackbarHost = remember { SnackbarHostState() }
+    LaunchedEffect(socketErrors) {
+        socketErrors.collect { msg ->
+            snackbarHost.showSnackbar(message = msg, duration = SnackbarDuration.Short)
+        }
+    }
+
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         containerColor = KumaCream,
+        snackbarHost = { SnackbarHost(snackbarHost) },
         bottomBar = {
             HorizontalDivider(color = KumaCardBorder)
             // A11Y12: drop the explicit 72.dp height. M3 default (80dp) is
@@ -119,11 +152,18 @@ fun MainShell(
         // screens get top padding for free — none of them include their own
         // statusBars padding, and edgeToEdge in MainActivity means content
         // would otherwise render under the system status bar.
-        Box(
+        Column(
             modifier = Modifier
                 .padding(padding)
                 .windowInsetsPadding(WindowInsets.statusBars),
         ) {
+            // UX1: persistent banner whenever the socket isn't fully
+            // authenticated. Without this, a tab user has no signal that
+            // the data they're staring at is stale (the only connection
+            // status indicator was buried in Settings → Server). Hidden
+            // when AUTHENTICATED so the happy path stays unobtrusive.
+            ConnectionBanner(connection)
+            Box(modifier = Modifier.fillMaxSize()) {
             when (tab) {
                 Tab.HOME -> OverviewScreen(
                     vm = overviewVm,
@@ -151,7 +191,48 @@ fun MainShell(
                     onAddServer = onAddServer,
                 )
             }
+            }
         }
+    }
+}
+
+@Composable
+private fun ConnectionBanner(connection: KumaSocket.Connection) {
+    val (label, bg, fg) = when (connection) {
+        KumaSocket.Connection.AUTHENTICATED -> return
+        KumaSocket.Connection.CONNECTED ->
+            Triple("Connecting…", app.kumacheck.ui.theme.KumaWarnBg, app.kumacheck.ui.theme.KumaWarn)
+        KumaSocket.Connection.CONNECTING ->
+            Triple("Connecting…", app.kumacheck.ui.theme.KumaWarnBg, app.kumacheck.ui.theme.KumaWarn)
+        KumaSocket.Connection.LOGIN_REQUIRED ->
+            Triple("Reconnecting…", app.kumacheck.ui.theme.KumaWarnBg, app.kumacheck.ui.theme.KumaWarn)
+        KumaSocket.Connection.DISCONNECTED ->
+            Triple("Offline — data may be stale", app.kumacheck.ui.theme.KumaDownBg, app.kumacheck.ui.theme.KumaDown)
+        KumaSocket.Connection.ERROR ->
+            Triple("Connection error — pull to refresh", app.kumacheck.ui.theme.KumaDownBg, app.kumacheck.ui.theme.KumaDown)
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(28.dp)
+            .background(bg)
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(fg),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            label,
+            color = fg,
+            fontFamily = KumaFont,
+            fontWeight = FontWeight.Medium,
+            fontSize = KumaTypography.captionLarge,
+        )
     }
 }
 

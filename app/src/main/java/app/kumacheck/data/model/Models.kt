@@ -19,6 +19,25 @@ data class Monitor(
     val hostname: String?,
     val url: String?,
     val port: Int?,
+    /**
+     * P6: previously unmodelled Kuma fields, surfaced now so the UI can
+     * filter / display them rather than only round-tripping through
+     * `monitorsRaw`. Each one is optional — missing keys parse to null
+     * and feature code is expected to handle absence (e.g. an HTTP
+     * monitor has no `keyword`; a Docker monitor has no `httpBodyEncoding`).
+     */
+    val notificationIDList: List<Int>? = null,
+    val acceptedStatusCodes: List<String>? = null,
+    val keyword: String? = null,
+    val expiryNotification: Boolean? = null,
+    val maxredirects: Int? = null,
+    val ignoreTls: Boolean? = null,
+    val httpBodyEncoding: String? = null,
+    val authMethod: String? = null,
+    val packetSize: Int? = null,
+    val gameDig: String? = null,
+    val dockerHost: String? = null,
+    val dockerContainer: String? = null,
 )
 
 /**
@@ -34,6 +53,14 @@ data class Heartbeat(
     val msg: String,
     val ping: Double?,
     val important: Boolean,
+    /**
+     * Server timestamp parsed once at ingest into epoch millis for safe
+     * sorting (P2). The raw [time] string survives for display and as a
+     * dedupe key. May be null if the server pushed a malformed timestamp;
+     * callers ordering by recency should fall back to that case
+     * conservatively (e.g. treat null as oldest).
+     */
+    val timeMs: Long? = null,
 )
 
 /**
@@ -87,12 +114,29 @@ data class StatusPageGroup(
     val monitorIds: List<Int>,
 )
 
+/**
+ * Bootstrap-flavoured severity tag attached to a status page incident.
+ * Kuma's wire format ships these as raw strings (the CSS class name);
+ * we normalise to an enum so the UI doesn't have to deal with stringly-
+ * typed values and unknown future values fall back to [WARNING].
+ */
+enum class IncidentStyle(val wire: String) {
+    INFO("info"),
+    WARNING("warning"),
+    DANGER("danger"),
+    PRIMARY("primary");
+
+    companion object {
+        fun from(raw: String?): IncidentStyle =
+            raw?.lowercase()?.let { v -> entries.firstOrNull { it.wire == v } } ?: WARNING
+    }
+}
+
 data class StatusPageIncident(
     val id: Int,
     val title: String,
     val content: String,
-    /** info / warning / danger / primary — Kuma uses Bootstrap names. */
-    val style: String?,
+    val style: IncidentStyle,
     val createdDate: String?,
     val pin: Boolean,
 )

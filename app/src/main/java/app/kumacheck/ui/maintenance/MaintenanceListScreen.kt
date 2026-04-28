@@ -1,5 +1,7 @@
 package app.kumacheck.ui.maintenance
 
+import app.kumacheck.ui.theme.KumaTypography
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,7 +30,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.remember
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,7 +58,7 @@ fun MaintenanceListScreen(
     onMaintenanceTap: (Int) -> Unit,
     onCreateNew: () -> Unit,
 ) {
-    val items by vm.state.collectAsState()
+    val items by vm.state.collectAsStateWithLifecycle()
 
     Scaffold(
         containerColor = KumaCream,
@@ -105,7 +108,11 @@ fun MaintenanceListScreen(
             ) {
                 item { Spacer(Modifier.height(4.dp)) }
                 items(items, key = { it.id }) { m ->
-                    MaintenanceRow(m, onClick = { onMaintenanceTap(m.id) })
+                    // C10: stable per-row click lambda — see MonitorsScreen.
+                    val onClick = remember(m.id, onMaintenanceTap) {
+                        { onMaintenanceTap(m.id) }
+                    }
+                    MaintenanceRow(m, onClick = onClick)
                 }
                 item { Spacer(Modifier.height(24.dp)) }
             }
@@ -138,7 +145,7 @@ private fun MaintenanceRow(m: KumaSocket.Maintenance, onClick: () -> Unit) {
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp,
+                    fontSize = KumaTypography.bodyEmphasis,
                     maxLines = 1,
                 )
                 val subtitle = listOfNotNull(m.status, m.strategy)
@@ -148,7 +155,7 @@ private fun MaintenanceRow(m: KumaSocket.Maintenance, onClick: () -> Unit) {
                     subtitle.replaceFirstChar { it.titlecase() },
                     color = KumaSlate2,
                     fontFamily = KumaMono,
-                    fontSize = 11.sp,
+                    fontSize = KumaTypography.caption,
                 )
             }
             if (m.active) {

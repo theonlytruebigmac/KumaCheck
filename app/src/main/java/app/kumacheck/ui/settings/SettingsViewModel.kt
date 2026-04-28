@@ -1,5 +1,7 @@
 package app.kumacheck.ui.settings
 
+import app.kumacheck.util.stateInVm
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.kumacheck.data.auth.AuthRepository
@@ -20,6 +22,8 @@ class SettingsViewModel(
     private val socket: KumaSocket,
     private val auth: AuthRepository,
     private val prefs: KumaPrefs,
+    private val appVersionName: String,
+    private val migrationFailureFlow: kotlinx.coroutines.flow.Flow<String?>,
 ) : ViewModel() {
 
     data class UiState(
@@ -34,13 +38,35 @@ class SettingsViewModel(
         val servers: List<ServerEntry> = emptyList(),
         val activeServerId: Int? = null,
         val themeMode: ThemeMode = ThemeMode.SYSTEM,
-        val appVersion: String = APP_VERSION,
+        // ST3: populated from PackageManager at construction time so the
+        // displayed version always matches the installed APK without
+        // requiring a hand-bumped constant or BuildConfig generation.
+        val appVersion: String = "",
         /**
          * True iff at least one stored token is currently held in plaintext
          * because the AndroidKeyStore was unavailable when we tried to encrypt
          * it. Drives a Settings warning banner.
          */
         val tokensStoredPlaintext: Boolean = false,
+        /**
+         * True iff the most recent attempt to encrypt a token for storage
+         * failed. The token is still in memory for this session, but a
+         * restart will lose it (S1). Drives a Settings warning banner.
+         */
+        val keystoreUnavailableForWrite: Boolean = false,
+        /**
+         * Non-null if a startup migration ([KumaPrefs.migrateTokensIfNeeded]
+         * etc.) threw. The user should re-sign-in to recover (O3).
+         */
+        val migrationFailure: String? = null,
+        /**
+         * S2: true iff the active server URL is `http://` and the host is
+         * not on a recognised private/loopback range. Drives a persistent
+         * Settings banner — the login screen warns once at sign-in, but
+         * a phishing redirect to `http://attacker.com:3001` would silently
+         * work and the user would forget. Banner re-asserts every session.
+         */
+        val activeServerInsecureCleartext: Boolean = false,
     )
 
     // Chunked into typed combines so the field <-> flow mapping is checked at
@@ -64,6 +90,10 @@ class SettingsViewModel(
         val themeMode: ThemeMode,
         val tokensStoredPlaintext: Boolean,
     )
+    private data class DiagnosticsBits(
+        val keystoreUnavailableForWrite: Boolean,
+        val migrationFailure: String?,
+    )
 
     val state: StateFlow<UiState> = run {
         val server = combine(
@@ -76,7 +106,10 @@ class SettingsViewModel(
         val list = combine(
             prefs.servers, prefs.activeServerId, prefs.themeMode, prefs.tokensStoredPlaintext,
         ) { servers, id, theme, plaintext -> ServerListBits(servers, id, theme, plaintext) }
-        combine(server, notif, list) { s, n, l ->
+        val diagnostics = combine(
+            prefs.keystoreUnavailableForWrite, migrationFailureFlow,
+        ) { ks, mig -> DiagnosticsBits(ks, mig) }
+        combine(server, notif, list, diagnostics) { s, n, l, d ->
             UiState(
                 serverUrl = s.url,
                 username = s.username,
@@ -89,9 +122,13 @@ class SettingsViewModel(
                 servers = l.servers,
                 activeServerId = l.activeId,
                 themeMode = l.themeMode,
+                appVersion = appVersionName,
                 tokensStoredPlaintext = l.tokensStoredPlaintext,
+                keystoreUnavailableForWrite = d.keystoreUnavailableForWrite,
+                migrationFailure = d.migrationFailure,
+                activeServerInsecureCleartext = isInsecureCleartextUrl(s.url),
             )
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
+        }.stateInVm(this, UiState(appVersion = appVersionName))
     }
 
     private val _signedOut = MutableStateFlow(false)
@@ -159,8 +196,37 @@ class SettingsViewModel(
     fun setThemeMode(mode: ThemeMode) {
         viewModelScope.launch { prefs.setThemeMode(mode) }
     }
+}
 
-    companion object {
-        const val APP_VERSION = "0.5.0"
+/**
+ * S2: classify a server URL as "insecure cleartext" when it's `http://`
+ * AND the host doesn't look loopback / link-local / private. We can't
+ * eliminate the global cleartext permit (Android's `<domain>` doesn't
+ * support CIDR, so IP-literal LAN addresses can't be enumerated), but we
+ * can warn at runtime when the user is on a public-looking host. Pure
+ * helper, top-level so the unit test (T-prefix in the audit) can poke
+ * the rules directly without an Android harness.
+ */
+internal fun isInsecureCleartextUrl(url: String?): Boolean {
+    if (url.isNullOrBlank()) return false
+    if (!url.startsWith("http://", ignoreCase = true)) return false
+    val host = runCatching { java.net.URI(url).host?.lowercase() }
+        .getOrNull() ?: return true  // unparseable + http:// is the worst case
+    if (host == "localhost" || host == "127.0.0.1" || host == "10.0.2.2") return false
+    // Loopback / link-local IPv6.
+    if (host == "::1" || host.startsWith("[::1") || host.startsWith("fe80:")) return false
+    // RFC1918 IPv4 — first-octet bucket sufficient for the literal forms
+    // Kuma users actually paste in.
+    val oct = host.split('.')
+    if (oct.size == 4 && oct.all { it.toIntOrNull() in 0..255 }) {
+        val a = oct[0].toInt(); val b = oct[1].toInt()
+        if (a == 10) return false
+        if (a == 172 && b in 16..31) return false
+        if (a == 192 && b == 168) return false
+        if (a == 169 && b == 254) return false  // link-local
     }
+    // Common LAN-suffix hostnames.
+    if (host.endsWith(".lan") || host.endsWith(".local") ||
+        host.endsWith(".internal") || host.endsWith(".home")) return false
+    return true
 }

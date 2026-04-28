@@ -1,5 +1,7 @@
 package app.kumacheck.ui.splash
 
+import app.kumacheck.ui.theme.KumaTypography
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -9,11 +11,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -34,7 +33,8 @@ fun SplashScreen(
     onToOverview: () -> Unit,
     onToLogin: () -> Unit,
 ) {
-    val decision by vm.decision.collectAsState()
+    val decision by vm.decision.collectAsStateWithLifecycle()
+    val connection by vm.connection.collectAsStateWithLifecycle()
 
     LaunchedEffect(decision) {
         when (decision) {
@@ -44,19 +44,16 @@ fun SplashScreen(
         }
     }
 
-    val phases = remember {
-        listOf(
-            "Reading prefs…",
-            "Connecting socket…",
-            "Authenticating…",
-        )
-    }
-    var phaseIndex by androidx.compose.runtime.saveable.rememberSaveable { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        while (phaseIndex < phases.lastIndex) {
-            kotlinx.coroutines.delay(1_200)
-            phaseIndex++
-        }
+    // UX5: phase label now tracks the actual socket handshake instead of
+    // ticking on a 1.2s timer. The 8s `withTimeout` in SplashViewModel is
+    // still the guard rail — this only influences what the user reads.
+    val phaseLabel = when (connection) {
+        app.kumacheck.data.socket.KumaSocket.Connection.DISCONNECTED -> "Reading prefs…"
+        app.kumacheck.data.socket.KumaSocket.Connection.CONNECTING -> "Connecting…"
+        app.kumacheck.data.socket.KumaSocket.Connection.CONNECTED -> "Authenticating…"
+        app.kumacheck.data.socket.KumaSocket.Connection.LOGIN_REQUIRED -> "Signing in…"
+        app.kumacheck.data.socket.KumaSocket.Connection.AUTHENTICATED -> "Ready"
+        app.kumacheck.data.socket.KumaSocket.Connection.ERROR -> "Retrying…"
     }
 
     Box(
@@ -78,7 +75,7 @@ fun SplashScreen(
                 color = KumaInk,
                 fontFamily = KumaFont,
                 fontWeight = FontWeight.Bold,
-                fontSize = 24.sp,
+                fontSize = KumaTypography.statNumber,
                 letterSpacing = (-0.6).sp,
             )
             Spacer(Modifier.height(6.dp))
@@ -86,16 +83,16 @@ fun SplashScreen(
                 "WATCHING, ALWAYS",
                 color = KumaSlate2,
                 fontFamily = KumaMono,
-                fontSize = 11.sp,
+                fontSize = KumaTypography.caption,
                 letterSpacing = 0.6.sp,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.height(36.dp))
             Text(
-                phases[phaseIndex],
+                phaseLabel,
                 color = KumaSlate2,
                 fontFamily = KumaMono,
-                fontSize = 11.sp,
+                fontSize = KumaTypography.caption,
             )
         }
     }

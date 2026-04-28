@@ -15,17 +15,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # CI1: third-party Actions pinned to commit SHA, not a floating tag —
+    # tags are mutable, so a compromised maintainer (or a force-push to a
+    # major-version tag) would otherwise execute arbitrary code in CI with
+    # access to GITHUB_TOKEN. Renovate/Dependabot bumps the SHAs on a
+    # controlled schedule with the version comment for review.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
         with:
           distribution: temurin
           java-version: 21
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
 
       - name: Lint
         run: ./gradlew :app:lintDebug --stacktrace
@@ -36,9 +41,18 @@ jobs:
       - name: Assemble debug APK
         run: ./gradlew :app:assembleDebug --stacktrace
 
+      - name: Assemble release (unsigned) — exercise R8 / Proguard
+        # C3: run the release build in CI so R8 / Proguard config breaks
+        # surface here, not at tag time. No keystore secret is wired into
+        # CI; the release build falls through to the C1 unsigned path
+        # (`applicationIdSuffix = ".unsigned"`, debug-key signed) which is
+        # safe to publish nowhere but exercises every shrink/optimize
+        # rule the real Play upload exercises.
+        run: ./gradlew :app:assembleRelease --stacktrace
+
       - name: Upload debug APK
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: app-debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/app-debug.apk
@@ -47,7 +61,7 @@ jobs:
 
       - name: Upload lint report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lint-report-${{ github.sha }}
           path: app/build/reports/lint-results-debug.html
@@ -56,7 +70,7 @@ jobs:
 
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-reports-${{ github.sha }}
           path: app/build/reports/tests/testDebugUnitTest/

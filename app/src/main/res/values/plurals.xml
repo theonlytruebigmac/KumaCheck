@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      A3: hand-built `if (n == 1) "incident" else "incidents"` works in
+      English but breaks in any locale with non-binary plural rules
+      (Russian: 3 forms, Arabic: 6, Polish: 3). Use plurals.xml so we
+      pick up the right form via `pluralStringResource(R.plurals.x, n, n)`
+      when i18n lands.
+    -->
+    <plurals name="overview_incident_count">
+        <item quantity="one">%d incident</item>
+        <item quantity="other">%d incidents</item>
+    </plurals>
+</resources>

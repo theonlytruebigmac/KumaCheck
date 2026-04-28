@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!--
+      TH2 / C5: dark-mode override for the cold-start window theme. Compose's
+      `MainActivity` SideEffect ultimately drives bar colors at runtime, but
+      the XML values are what flash for one frame on cold-start / process
+      death — without this file, dark-mode users see a cream bar before
+      Compose initializes.
+
+      Mirrors values/themes.xml structurally; only the colors and the
+      windowLight* booleans flip.
+    -->
+    <style name="Theme.KumaCheck" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/kuma_ink_deep</item>
+        <item name="android:colorBackground">@color/kuma_ink_deep</item>
+
+        <item name="android:statusBarColor">@color/kuma_ink_deep</item>
+        <item name="android:navigationBarColor">@color/kuma_ink_deep</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">false</item>
+
+        <item name="android:autofilledHighlight">@color/kuma_terra_low</item>
+    </style>
+</resources>

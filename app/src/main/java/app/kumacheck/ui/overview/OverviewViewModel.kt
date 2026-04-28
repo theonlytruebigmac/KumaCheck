@@ -1,5 +1,7 @@
 package app.kumacheck.ui.overview
 
+import app.kumacheck.util.stateInVm
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.kumacheck.data.auth.KumaPrefs
@@ -126,7 +128,7 @@ class OverviewViewModel(
 
             computeOverviewState(monitors, beats, uptime, avgPing, maint, pinned, recentBeats, certs, ackSet)
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
+        .stateInVm(this, UiState())
 
     fun refresh() {
         if (_isRefreshing.value) return
@@ -140,9 +142,10 @@ class OverviewViewModel(
 
     fun setPinned(id: Int, pinned: Boolean) {
         viewModelScope.launch {
-            val current = state.value.pinnedIds.toMutableSet()
-            if (pinned) current.add(id) else current.remove(id)
-            prefs.setPinnedMonitorIds(current)
+            // B1: atomic add/remove inside dataStore.edit. The previous
+            // read-from-state-then-write pattern raced — two rapid toggles
+            // could drop a mutation when the second wrote a stale snapshot.
+            prefs.togglePinnedMonitor(id, pinned)
         }
     }
 
@@ -245,7 +248,13 @@ internal fun computeOverviewState(
                 if (hb.status != MonitorStatus.UP && hb.status != MonitorStatus.DOWN) {
                     return@forEach
                 }
-                val ts = parseBeatTime(hb.time) ?: return@forEach
+                // Use the pre-parsed `timeMs` set at heartbeat-ingest (P2)
+                // instead of re-running SimpleDateFormat on every emit. With
+                // ~200 monitors × 50-beat history × ~3 emits/s, the previous
+                // parseBeatTime call burned through ~30k parses/s in this
+                // hot loop alone. Falls back to parseBeatTime only for the
+                // rare malformed-time case.
+                val ts = hb.timeMs ?: parseBeatTime(hb.time) ?: return@forEach
                 out.add(
                     OverviewViewModel.Incident(
                         monitorId = mid,
@@ -271,7 +280,9 @@ internal fun computeOverviewState(
         val out = ArrayList<OverviewViewModel.CertWarning>()
         for (st in activeStates) {
             val info = certInfo[st.monitor.id] ?: continue
-            val days = info.daysRemaining
+            // P5: re-derive against `nowMs` so a stale server snapshot
+            // doesn't keep showing "10 days" once we're at 3.
+            val days = info.daysRemainingNow(nowMs)
             val flagged = !info.valid || (days != null && days <= CERT_WARN_THRESHOLD_DAYS)
             if (!flagged) continue
             out.add(
@@ -302,7 +313,10 @@ internal fun computeOverviewState(
             if (mon.type == "group") continue
             if (!mon.active || mon.forceInactive) continue
             for (hb in history) {
-                val ts = parseBeatTime(hb.time) ?: continue
+                // Pre-parsed timestamp (P2) — avoid SimpleDateFormat in the
+                // heat-strip's inner loop too. Same N×H×emits/s scaling
+                // concern as the incident loop above.
+                val ts = hb.timeMs ?: parseBeatTime(hb.time) ?: continue
                 val delta = nowMs - ts
                 if (delta < 0 || delta >= HEATMAP_WINDOW_MS) continue
                 val bin = HEATMAP_CELLS - 1 - (delta / bucketMs).toInt().coerceIn(0, HEATMAP_CELLS - 1)

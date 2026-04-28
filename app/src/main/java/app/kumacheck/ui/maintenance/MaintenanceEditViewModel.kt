@@ -71,6 +71,14 @@ class MaintenanceEditViewModel(
         val error: String? = null,
         val saved: Boolean = false,
         val isEditing: Boolean = false,
+        /**
+         * M4: non-null when an existing maintenance window had at least
+         * one un-parseable date string on load. Tells the UI to surface
+         * "couldn't parse server date — please re-enter" instead of the
+         * misleading "Start and end dates are required" the SINGLE
+         * validator emits when the field is null.
+         */
+        val loadDateParseFailed: Boolean = false,
     )
 
     private val _state = MutableStateFlow(UiState(isEditing = editingId != null))
@@ -123,8 +131,54 @@ class MaintenanceEditViewModel(
     fun onDescription(v: String) = _state.update {
         it.copy(form = it.form.copy(description = v), error = null)
     }
-    fun onStrategy(s: Strategy) = _state.update {
-        it.copy(form = it.form.copy(strategy = s), error = null)
+    fun onStrategy(s: Strategy) = _state.update { ui ->
+        // M2: clear fields that don't apply to the new strategy. The screen
+        // already hides them visually, but stale state still emits in the
+        // payload (the builder is strategy-aware so the server is fine, but
+        // a CRON → SINGLE flip would, before this clear, restore a stale
+        // typed cron the moment the user toggled back). Title / description
+        // / active / monitor selection survive — those are strategy-agnostic.
+        val cleared = when (s) {
+            Strategy.MANUAL -> ui.form.copy(
+                strategy = s,
+                startMillis = null,
+                endMillis = null,
+                weekdays = emptySet(),
+                daysOfMonth = emptySet(),
+            )
+            Strategy.SINGLE -> ui.form.copy(
+                strategy = s,
+                weekdays = emptySet(),
+                daysOfMonth = emptySet(),
+            )
+            Strategy.RECURRING_WEEKDAY -> ui.form.copy(
+                strategy = s,
+                startMillis = null,
+                endMillis = null,
+                daysOfMonth = emptySet(),
+            )
+            Strategy.RECURRING_INTERVAL -> ui.form.copy(
+                strategy = s,
+                startMillis = null,
+                endMillis = null,
+                weekdays = emptySet(),
+                daysOfMonth = emptySet(),
+            )
+            Strategy.RECURRING_DAY_OF_MONTH -> ui.form.copy(
+                strategy = s,
+                startMillis = null,
+                endMillis = null,
+                weekdays = emptySet(),
+            )
+            Strategy.CRON -> ui.form.copy(
+                strategy = s,
+                startMillis = null,
+                endMillis = null,
+                weekdays = emptySet(),
+                daysOfMonth = emptySet(),
+            )
+        }
+        ui.copy(form = cleared, error = null)
     }
     fun onActive(b: Boolean) = _state.update { it.copy(form = it.form.copy(active = b)) }
     fun onStartMillis(ms: Long?) = _state.update { it.copy(form = it.form.copy(startMillis = ms)) }
@@ -164,30 +218,9 @@ class MaintenanceEditViewModel(
         if (cur.isSaving || cur.isLoading) return
 
         val f = cur.form
-        if (f.title.isBlank()) {
-            _state.update { it.copy(error = "Title is required") }
+        validateMaintenanceForm(f)?.let { error ->
+            _state.update { it.copy(error = error) }
             return
-        }
-        when (f.strategy) {
-            Strategy.SINGLE -> if (f.startMillis == null || f.endMillis == null) {
-                _state.update { it.copy(error = "Start and end dates are required") }; return
-            }
-            Strategy.RECURRING_WEEKDAY -> if (f.weekdays.isEmpty()) {
-                _state.update { it.copy(error = "Pick at least one weekday") }; return
-            }
-            Strategy.RECURRING_DAY_OF_MONTH -> if (f.daysOfMonth.isEmpty()) {
-                _state.update { it.copy(error = "Pick at least one day of the month") }; return
-            }
-            Strategy.CRON -> {
-                if (f.cron.isBlank()) {
-                    _state.update { it.copy(error = "Cron expression is required") }; return
-                }
-                if (!isValidCronShape(f.cron)) {
-                    _state.update { it.copy(error = "Cron must have 5 whitespace-separated fields (minute hour day month weekday)") }
-                    return
-                }
-            }
-            Strategy.MANUAL, Strategy.RECURRING_INTERVAL -> {} // no extra validation
         }
 
         _state.update { it.copy(isSaving = true, error = null) }
@@ -240,6 +273,17 @@ class MaintenanceEditViewModel(
         val tz = m.timezone?.takeIf { it.isNotBlank() }
             ?.let { runCatching { TimeZone.getTimeZone(it) }.getOrNull() }
             ?: TimeZone.getDefault()
+        // M4: track parse failures explicitly so the UI can distinguish
+        // "user hasn't typed yet" from "we tried to load a server value
+        // and couldn't read it." The SINGLE-strategy validator emits
+        // "Start and end dates are required" when these are null —
+        // misleading if the user *had* a date, the parser just couldn't
+        // read it. The Edit screen now surfaces a banner pointing at
+        // that case.
+        val startMs = parseServerDate(m.startDate, tz)
+        val endMs = parseServerDate(m.endDate, tz)
+        val startFailed = !m.startDate.isNullOrBlank() && startMs == null
+        val endFailed = !m.endDate.isNullOrBlank() && endMs == null
         _state.update {
             it.copy(
                 form = it.form.copy(
@@ -247,8 +291,8 @@ class MaintenanceEditViewModel(
                     description = m.description.orEmpty(),
                     strategy = strategy,
                     active = m.active,
-                    startMillis = parseServerDate(m.startDate, tz),
-                    endMillis = parseServerDate(m.endDate, tz),
+                    startMillis = startMs,
+                    endMillis = endMs,
                     weekdays = weekdays,
                     daysOfMonth = daysOfMonth,
                     intervalDay = intervalDay,
@@ -256,6 +300,7 @@ class MaintenanceEditViewModel(
                     cronDurationMinutes = m.durationMinutes ?: it.form.cronDurationMinutes,
                     durationMinutes = m.durationMinutes,
                 ),
+                loadDateParseFailed = startFailed || endFailed,
             )
         }
     }
@@ -265,29 +310,88 @@ class MaintenanceEditViewModel(
      * minute, etc.) — that's the server's job — but rejects obvious typos
      * like 4-field expressions before they cause an opaque server error.
      */
-    private fun isValidCronShape(cron: String): Boolean {
-        val fields = cron.trim().split(Regex("\\s+"))
-        return fields.size == 5 && fields.all { it.isNotEmpty() }
-    }
+    // Member shim that delegates to the top-level helper so the
+    // file-scoped function is reachable both from the ViewModel and from
+    // [validateMaintenanceForm]. Kept here so the tested rule lives in
+    // one place.
+    private fun isValidCronShape(cron: String): Boolean = isValidCronShapeImpl(cron)
 
-    private fun parseServerDate(s: String?, tz: TimeZone = TimeZone.getDefault()): Long? {
-        if (s.isNullOrBlank()) return null
-        val patterns = listOf(
-            "yyyy-MM-dd HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm:ss",
-            "yyyy-MM-dd HH:mm",
-        )
-        for (p in patterns) {
-            val fmt = SimpleDateFormat(p, Locale.US)
-            fmt.timeZone = tz
-            runCatching { return fmt.parse(s)!!.time }
-        }
-        return null
-    }
+    private fun parseServerDate(s: String?, tz: TimeZone = TimeZone.getDefault()): Long? =
+        parseServerDateImpl(s, tz)
 
     companion object {
         /** 0=Mon … 6=Sun, matching Kuma's weekdays array convention. */
         val WEEKDAY_NAMES = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    }
+}
+
+/**
+ * Cheap shape check for cron expressions. Pre-validates obvious garbage
+ * (4-field expressions, empty fields) before they hit the server. Not a
+ * full cron grammar — `99 99 99 99 99` passes the shape but the server
+ * will reject it. Intentional minimum.
+ */
+private fun isValidCronShapeImpl(cron: String): Boolean {
+    val fields = cron.trim().split(Regex("\\s+"))
+    return fields.size == 5 && fields.all { it.isNotEmpty() }
+}
+
+/**
+ * Parse a server-supplied maintenance datetime string. Walks a small set of
+ * Kuma-emitted patterns; returns null if none match. Pulled to file scope so
+ * tests can call it without a ViewModel/socket harness — see B2 in the audit.
+ */
+internal fun parseServerDateImpl(s: String?, tz: TimeZone = TimeZone.getDefault()): Long? {
+    if (s.isNullOrBlank()) return null
+    val patterns = listOf(
+        "yyyy-MM-dd HH:mm:ss",
+        "yyyy-MM-dd'T'HH:mm:ss",
+        "yyyy-MM-dd HH:mm",
+    )
+    for (p in patterns) {
+        val fmt = SimpleDateFormat(p, Locale.US)
+        fmt.timeZone = tz
+        // B2: keep runCatching tight around parse() (locale/format errors are
+        // normal as we walk the patterns) but pull `.time` out so a legitimate
+        // null-from-parse doesn't get conflated with an exception via `!!`.
+        val parsed = runCatching { fmt.parse(s) }.getOrNull() ?: continue
+        return parsed.time
+    }
+    return null
+}
+
+/**
+ * Pure form validator. Returns null if the form is acceptable to send,
+ * else a user-facing error message describing the first failure. Pulled
+ * out of the ViewModel so tests can exercise the rules without a fake
+ * socket / coroutine harness — the error strings are part of the
+ * contract and assertions can match them directly.
+ */
+internal fun validateMaintenanceForm(f: MaintenanceEditViewModel.Form): String? {
+    if (f.title.isBlank()) return "Title is required"
+    return when (f.strategy) {
+        MaintenanceEditViewModel.Strategy.SINGLE -> when {
+            f.startMillis == null || f.endMillis == null ->
+                "Start and end dates are required"
+            // V1: reject end-before-start. Pre-fix this slipped past
+            // and `calcDurationMinutes` silently fell back to 60 mins
+            // with a negative span on the payload.
+            f.endMillis <= f.startMillis ->
+                "End must be after start"
+            else -> null
+        }
+        MaintenanceEditViewModel.Strategy.RECURRING_WEEKDAY ->
+            if (f.weekdays.isEmpty()) "Pick at least one weekday" else null
+        MaintenanceEditViewModel.Strategy.RECURRING_DAY_OF_MONTH ->
+            if (f.daysOfMonth.isEmpty()) "Pick at least one day of the month" else null
+        MaintenanceEditViewModel.Strategy.CRON -> when {
+            f.cron.isBlank() -> "Cron expression is required"
+            !isValidCronShapeImpl(f.cron) ->
+                "Cron must have 5 whitespace-separated fields (minute hour day month weekday)"
+            else -> null
+        }
+        MaintenanceEditViewModel.Strategy.MANUAL,
+        MaintenanceEditViewModel.Strategy.RECURRING_INTERVAL -> null
     }
 }
 
@@ -312,7 +416,21 @@ internal fun buildMaintenancePayload(
     p.put("weekdays", JSONArray(f.weekdays.toList().sorted()))
     p.put("daysOfMonth", JSONArray(f.daysOfMonth.toList().sorted()))
     p.put("intervalDay", f.intervalDay)
-    p.put("cron", f.cron.ifBlank { "30 3 * * *" })
+    // B4: only seed the placeholder cron for strategies that actually
+    // consume one (CRON itself, plus the recurring strategies that may
+    // derive a fallback). For MANUAL / SINGLE the field stays empty so
+    // we don't ship a fake "30 3 * * *" alongside an unrelated date
+    // range. The user-typed cron survives if non-blank.
+    val cronValue = when (f.strategy) {
+        MaintenanceEditViewModel.Strategy.CRON,
+        MaintenanceEditViewModel.Strategy.RECURRING_WEEKDAY,
+        MaintenanceEditViewModel.Strategy.RECURRING_INTERVAL,
+        MaintenanceEditViewModel.Strategy.RECURRING_DAY_OF_MONTH ->
+            f.cron.ifBlank { "30 3 * * *" }
+        MaintenanceEditViewModel.Strategy.MANUAL,
+        MaintenanceEditViewModel.Strategy.SINGLE -> f.cron
+    }
+    p.put("cron", cronValue)
 
     when (f.strategy) {
         MaintenanceEditViewModel.Strategy.SINGLE -> {

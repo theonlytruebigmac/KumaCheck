@@ -1,5 +1,7 @@
 package app.kumacheck.ui.detail
 
+import app.kumacheck.util.stateInVm
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.kumacheck.data.auth.KumaPrefs
@@ -78,7 +80,7 @@ class MonitorDetailViewModel(
             error = values[8] as? String,
             certInfo = values[9] as? KumaSocket.CertInfo,
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
+    }.stateInVm(this, UiState())
 
     init {
         refresh()
@@ -91,9 +93,11 @@ class MonitorDetailViewModel(
             socket.beats.collect { hb ->
                 if (hb.monitorId != monitorId) return@collect
                 _history.update { current ->
-                    val incomingMs = parseBeatTime(hb.time)
+                    // Use pre-parsed `timeMs` (P2) for the dedupe compare.
+                    // String-equality fallback covers schema-drift beats.
+                    val incomingMs = hb.timeMs ?: parseBeatTime(hb.time)
                     val isDuplicate = if (incomingMs != null) {
-                        current.any { parseBeatTime(it.time) == incomingMs }
+                        current.any { (it.timeMs ?: parseBeatTime(it.time)) == incomingMs }
                     } else {
                         current.any { it.time == hb.time }
                     }
@@ -114,11 +118,12 @@ class MonitorDetailViewModel(
                 // serverWindow yet — keep any cached entries whose timestamp
                 // is strictly newer than the most recent server beat. Falls
                 // back to string-equality dedupe when timestamps don't parse.
-                val cutoff = serverWindow.lastOrNull()?.time?.let(::parseBeatTime)
+                val cutoff = serverWindow.lastOrNull()
+                    ?.let { it.timeMs ?: parseBeatTime(it.time) }
                 val seen = serverWindow.mapTo(HashSet()) { it.time }
                 val tail = current.filter { hb ->
                     if (hb.time in seen) return@filter false
-                    val t = parseBeatTime(hb.time) ?: return@filter true
+                    val t = hb.timeMs ?: parseBeatTime(hb.time) ?: return@filter true
                     cutoff == null || t > cutoff
                 }
                 (serverWindow + tail).takeLast(MAX_HISTORY)
@@ -129,9 +134,10 @@ class MonitorDetailViewModel(
 
     fun setMuted(muted: Boolean) {
         viewModelScope.launch {
-            val current = prefs.mutedMonitorIds.first().toMutableSet()
-            if (muted) current.add(monitorId) else current.remove(monitorId)
-            prefs.setMutedMonitorIds(current)
+            // B1: atomic add/remove inside dataStore.edit. The previous
+            // read-then-write pattern raced — two rapid toggles (or a
+            // notification handler racing a UI tap) could drop a mutation.
+            prefs.toggleMutedMonitor(monitorId, muted)
         }
     }
 

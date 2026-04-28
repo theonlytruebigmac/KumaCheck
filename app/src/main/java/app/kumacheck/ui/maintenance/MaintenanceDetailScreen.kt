@@ -1,5 +1,7 @@
 package app.kumacheck.ui.maintenance
 
+import app.kumacheck.ui.theme.KumaTypography
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -36,7 +38,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -73,7 +75,7 @@ fun MaintenanceDetailScreen(
     onEdit: () -> Unit,
     onMonitorTap: (Int) -> Unit,
 ) {
-    val ui by vm.state.collectAsState()
+    val ui by vm.state.collectAsStateWithLifecycle()
     val m = ui.maintenance
 
     LaunchedEffect(ui.deleted) { if (ui.deleted) onBack() }
@@ -248,7 +250,7 @@ private fun HeroCard(m: KumaSocket.Maintenance) {
                     color = accent,
                     fontFamily = KumaMono,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 11.sp,
+                    fontSize = KumaTypography.caption,
                     letterSpacing = 0.6.sp,
                 )
                 Spacer(Modifier.height(2.dp))
@@ -281,14 +283,14 @@ private fun ActiveToggleCard(
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp,
+                    fontSize = KumaTypography.bodyEmphasis,
                 )
                 Text(
                     if (m.active) "Currently in effect"
                     else "Paused — monitors report normally",
                     color = KumaSlate2,
                     fontFamily = KumaFont,
-                    fontSize = 12.sp,
+                    fontSize = KumaTypography.captionLarge,
                 )
             }
             Switch(
@@ -323,7 +325,7 @@ private fun AffectedMonitorsCard(
                         "Loading…",
                         color = KumaSlate2,
                         fontFamily = KumaFont,
-                        fontSize = 12.sp,
+                        fontSize = KumaTypography.captionLarge,
                     )
                 }
             }
@@ -336,7 +338,7 @@ private fun AffectedMonitorsCard(
                         "No monitors attached",
                         color = KumaSlate2,
                         fontFamily = KumaFont,
-                        fontSize = 12.sp,
+                        fontSize = KumaTypography.captionLarge,
                     )
                 }
             }
@@ -355,7 +357,7 @@ private fun AffectedMonitorsCard(
                                 color = KumaInk,
                                 fontFamily = KumaFont,
                                 fontWeight = FontWeight.Medium,
-                                fontSize = 13.sp,
+                                fontSize = KumaTypography.body,
                                 modifier = Modifier.weight(1f),
                                 maxLines = 1,
                             )
@@ -410,14 +412,14 @@ private fun ScheduleRow(label: String, value: String) {
             label,
             color = KumaInk,
             fontFamily = KumaFont,
-            fontSize = 13.sp,
+            fontSize = KumaTypography.body,
             modifier = Modifier.width(110.dp),
         )
         Text(
             value,
             color = KumaSlate2,
             fontFamily = KumaMono,
-            fontSize = 12.sp,
+            fontSize = KumaTypography.captionLarge,
         )
     }
 }

@@ -97,7 +97,7 @@ app/src/main/java/app/kumacheck/
 
 ## Roadmap
 
-[`docs/ROADMAP.md`](docs/ROADMAP.md) tracks remaining work with status markers (`Not started` / `WIP` / `Done`). Notable gaps still to close: type-specific monitor edit fields, "add new monitor" flow, certificate expiry surfacing, relative timestamps, quiet hours, home-screen widgets, light/system theme, multi-server.
+KumaCheck reached MVP at v0.5.0 (Tiers 1-3 shipped). Post-MVP work is tracked alongside the audit in [`docs/CODE_AUDIT.md`](docs/CODE_AUDIT.md), which doubles as the active punch list. Releases are documented in [`docs/RELEASE.md`](docs/RELEASE.md).
 
 ## Inspiration and acknowledgments
 

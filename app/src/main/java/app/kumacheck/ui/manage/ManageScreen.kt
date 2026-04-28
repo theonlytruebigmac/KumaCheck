@@ -11,6 +11,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -26,7 +27,7 @@ fun ManageScreen(
     onMonitorTap: (Int) -> Unit,
     onCreateMonitor: () -> Unit,
 ) {
-    val ui by vm.state.collectAsState()
+    val ui by vm.state.collectAsStateWithLifecycle()
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(KumaCream),
@@ -43,7 +44,7 @@ fun ManageScreen(
                         "CONFIGURATION",
                         color = KumaSlate2,
                         fontFamily = KumaMono,
-                        fontSize = 11.sp,
+                        fontSize = KumaTypography.caption,
                         letterSpacing = 0.6.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
@@ -53,7 +54,7 @@ fun ManageScreen(
                         color = KumaInk,
                         fontFamily = KumaFont,
                         fontWeight = FontWeight.Bold,
-                        fontSize = 28.sp,
+                        fontSize = KumaTypography.display,
                         letterSpacing = (-0.6).sp,
                     )
                 }
@@ -111,7 +112,7 @@ private fun ManageRow(
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = FontWeight.Medium,
-                    fontSize = 13.sp,
+                    fontSize = KumaTypography.body,
                     maxLines = 1,
                 )
                 if (sub.isNotEmpty()) {
@@ -119,7 +120,7 @@ private fun ManageRow(
                         sub,
                         color = KumaSlate2,
                         fontFamily = KumaMono,
-                        fontSize = 10.sp,
+                        fontSize = KumaTypography.captionSmall,
                         maxLines = 1,
                     )
                 }
@@ -162,7 +163,7 @@ private fun TypeBadge(type: String) {
             color = KumaSlate,
             fontFamily = KumaMono,
             fontWeight = FontWeight.SemiBold,
-            fontSize = 10.sp,
+            fontSize = KumaTypography.captionSmall,
             letterSpacing = 0.4.sp,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
         )

@@ -8,16 +8,17 @@ import androidx.compose.runtime.Composable
 import app.kumacheck.ui.manage.ManageScreen
 import app.kumacheck.ui.monitors.MonitorsScreen
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
 import androidx.lifecycle.createSavedStateHandle
-import androidx.lifecycle.viewmodel.CreationExtras
 import kotlinx.coroutines.flow.filterNotNull
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -84,12 +85,18 @@ fun AppNav(
     onConsumeMonitorId: () -> Unit = {},
 ) {
     val nav = rememberNavController()
-    val factory = remember(app) { ViewModelFactory(app) }
-    val connection by app.socket.connection.collectAsState()
+    // Q1: each route below uses `viewModelFactory { initializer { … } }` so a
+    // VM construction lives next to the screen that needs it and a missing
+    // VM is a compile error rather than a runtime crash from a forgotten
+    // `when` case in a central factory.
+    val connection by app.socket.connection.collectAsStateWithLifecycle()
 
     NavHost(navController = nav, startDestination = Routes.SPLASH) {
         composable(Routes.SPLASH) {
-            val vm: SplashViewModel = viewModel(factory = factory)
+            val splashFactory = remember(app) {
+                viewModelFactory { initializer { SplashViewModel(app.prefs, app.auth, app.socket) } }
+            }
+            val vm: SplashViewModel = viewModel(factory = splashFactory)
             SplashScreen(
                 vm = vm,
                 onToOverview = {
@@ -105,7 +112,17 @@ fun AppNav(
             )
         }
         composable(Routes.LOGIN) {
-            val vm: LoginViewModel = viewModel(factory = factory)
+            val loginFactory = remember(app) {
+                viewModelFactory {
+                    initializer {
+                        LoginViewModel(
+                            app.auth, app.prefs, app.socket,
+                            savedState = createSavedStateHandle(),
+                        )
+                    }
+                }
+            }
+            val vm: LoginViewModel = viewModel(factory = loginFactory)
             LoginScreen(vm = vm, onAuthenticated = {
                 nav.navigate(Routes.MAIN) {
                     popUpTo(Routes.LOGIN) { inclusive = true }
@@ -113,7 +130,17 @@ fun AppNav(
             })
         }
         composable(Routes.LOGIN_ADD) {
-            val vm: LoginViewModel = viewModel(factory = factory)
+            val loginAddFactory = remember(app) {
+                viewModelFactory {
+                    initializer {
+                        LoginViewModel(
+                            app.auth, app.prefs, app.socket,
+                            savedState = createSavedStateHandle(),
+                        )
+                    }
+                }
+            }
+            val vm: LoginViewModel = viewModel(factory = loginAddFactory)
             // Allocate a fresh server slot on entry so URL/credential edits
             // mutate the new entry rather than the current active server.
             // On back-pop without saving, `cancelAddIfEmpty` drops the
@@ -133,10 +160,33 @@ fun AppNav(
             )
         }
         composable(Routes.MAIN) {
-            val overviewVm: OverviewViewModel = viewModel(factory = factory)
-            val statusPagesVm: StatusPagesListViewModel = viewModel(factory = factory)
-            val settingsVm: SettingsViewModel = viewModel(factory = factory)
-            val incidentsVm: IncidentsListViewModel = viewModel(factory = factory)
+            val overviewFactory = remember(app) {
+                viewModelFactory { initializer { OverviewViewModel(app.socket, app.prefs) } }
+            }
+            val statusPagesFactory = remember(app) {
+                viewModelFactory { initializer { StatusPagesListViewModel(app.socket) } }
+            }
+            val settingsFactory = remember(app) {
+                viewModelFactory {
+                    initializer {
+                        SettingsViewModel(
+                            app.socket, app.auth, app.prefs,
+                            appVersionName = appVersionName(app),
+                            migrationFailureFlow = app.migrationFailureMessage,
+                        )
+                    }
+                }
+            }
+            val incidentsFactory = remember(app) {
+                viewModelFactory { initializer { IncidentsListViewModel(app.prefs) } }
+            }
+            val monitorsFactory = remember(app) {
+                viewModelFactory { initializer { MonitorsViewModel(app.socket) } }
+            }
+            val overviewVm: OverviewViewModel = viewModel(factory = overviewFactory)
+            val statusPagesVm: StatusPagesListViewModel = viewModel(factory = statusPagesFactory)
+            val settingsVm: SettingsViewModel = viewModel(factory = settingsFactory)
+            val incidentsVm: IncidentsListViewModel = viewModel(factory = incidentsFactory)
 
             // Consume any pending notification deep-link only once MAIN is on
             // screen — otherwise Splash's popUpTo would tear our pushed detail
@@ -160,11 +210,12 @@ fun AppNav(
 
             MainShell(
                 overviewVm = overviewVm,
-                monitorsVm = viewModel(factory = factory),
+                monitorsVm = viewModel(factory = monitorsFactory),
                 statusPagesVm = statusPagesVm,
                 settingsVm = settingsVm,
                 incidentsVm = incidentsVm,
                 connection = connection,
+                socketErrors = app.socket.errors,
                 onLoggedOut = {
                     nav.navigate(Routes.LOGIN) {
                         popUpTo(Routes.MAIN) { inclusive = true }
@@ -240,7 +291,10 @@ fun AppNav(
             arguments = listOf(navArgument("filter") { type = NavType.StringType }),
         ) { entry ->
             val filter = entry.arguments?.getString("filter") ?: "ALL"
-            val vm: MonitorsViewModel = viewModel(factory = factory)
+            val monitorsFactory = remember(app) {
+                viewModelFactory { initializer { MonitorsViewModel(app.socket) } }
+            }
+            val vm: MonitorsViewModel = viewModel(factory = monitorsFactory)
             LaunchedEffect(filter) {
                 val parsed = runCatching { MonitorsViewModel.Filter.valueOf(filter) }
                     .getOrDefault(MonitorsViewModel.Filter.ALL)
@@ -253,7 +307,10 @@ fun AppNav(
             )
         }
         composable(Routes.MANAGE_LIST) {
-            val vm: ManageViewModel = viewModel(factory = factory)
+            val manageFactory = remember(app) {
+                viewModelFactory { initializer { ManageViewModel(app.socket) } }
+            }
+            val vm: ManageViewModel = viewModel(factory = manageFactory)
             ManageScreenWithBack(
                 vm = vm,
                 onBack = { nav.popBackStack() },
@@ -311,7 +368,10 @@ fun AppNav(
             )
         }
         composable(Routes.MAINTENANCE_LIST) {
-            val vm: MaintenanceListViewModel = viewModel(factory = factory)
+            val maintListFactory = remember(app) {
+                viewModelFactory { initializer { MaintenanceListViewModel(app.socket) } }
+            }
+            val vm: MaintenanceListViewModel = viewModel(factory = maintListFactory)
             MaintenanceListScreen(
                 vm = vm,
                 onBack = { nav.popBackStack() },
@@ -463,31 +523,14 @@ private fun ManageScreenWithBack(
     }
 }
 
-private class ViewModelFactory(private val app: KumaCheckApp) : ViewModelProvider.Factory {
-    @Suppress("UNCHECKED_CAST")
-    override fun <T : ViewModel> create(
-        modelClass: Class<T>,
-        extras: androidx.lifecycle.viewmodel.CreationExtras,
-    ): T {
-        return when (modelClass) {
-            SplashViewModel::class.java -> SplashViewModel(app.prefs, app.auth, app.socket) as T
-            // SavedStateHandle pulled from CreationExtras so LoginVM's URL/
-            // username/totpRequired survive process death (PD2). The
-            // overload of create() that accepts extras is what the modern
-            // ViewModelProvider passes through; the no-arg create() below
-            // is kept for any caller that bypasses the extras path.
-            LoginViewModel::class.java -> LoginViewModel(
-                app.auth, app.prefs, app.socket,
-                savedState = extras.createSavedStateHandle(),
-            ) as T
-            OverviewViewModel::class.java -> OverviewViewModel(app.socket, app.prefs) as T
-            MonitorsViewModel::class.java -> MonitorsViewModel(app.socket) as T
-            ManageViewModel::class.java -> ManageViewModel(app.socket) as T
-            SettingsViewModel::class.java -> SettingsViewModel(app.socket, app.auth, app.prefs) as T
-            MaintenanceListViewModel::class.java -> MaintenanceListViewModel(app.socket) as T
-            StatusPagesListViewModel::class.java -> StatusPagesListViewModel(app.socket) as T
-            IncidentsListViewModel::class.java -> IncidentsListViewModel(app.prefs) as T
-            else -> error("Unknown ViewModel: $modelClass")
-        }
+/** ST3: read versionName from the installed APK's PackageInfo. */
+private fun appVersionName(app: KumaCheckApp): String = runCatching {
+    val pm = app.packageManager
+    val info = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+        pm.getPackageInfo(app.packageName, android.content.pm.PackageManager.PackageInfoFlags.of(0L))
+    } else {
+        @Suppress("DEPRECATION") pm.getPackageInfo(app.packageName, 0)
     }
-}
+    info.versionName
+}.getOrNull().orEmpty()
+

@@ -22,8 +22,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # CI1: same SHA-pin policy as ci.yml. The release workflow has access
+    # to RELEASE_KEYSTORE_BASE64 and signing-key passwords, so pinning is
+    # especially important here — a tag-repoint attack on a third-party
+    # Action would let an attacker exfiltrate the keystore and ship a
+    # backdoored APK signed with the legitimate key.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
@@ -37,13 +42,13 @@ jobs:
           fi
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
         with:
           distribution: temurin
           java-version: 21
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
 
       - name: Decode release keystore
         env:
@@ -60,37 +65,46 @@ jobs:
             exit 1
           fi
 
-      - name: Assemble release APK
+      - name: Assemble release APK and AAB
+        # CI4: also produce the AAB (Play Console upload format). The APK
+        # remains for sideload distribution via the GitHub Release. Bundling
+        # both in one Gradle invocation reuses the configuration / R8 work
+        # rather than running everything twice.
         env:
           RELEASE_KEYSTORE_FILE: ${{ runner.temp }}/release.keystore
           RELEASE_KEYSTORE_STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_STORE_PASSWORD }}
           RELEASE_KEYSTORE_KEY_ALIAS: ${{ secrets.RELEASE_KEYSTORE_KEY_ALIAS }}
           RELEASE_KEYSTORE_KEY_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_KEY_PASSWORD }}
-        run: ./gradlew :app:testDebugUnitTest :app:assembleRelease --stacktrace
+        run: ./gradlew :app:testDebugUnitTest :app:assembleRelease :app:bundleRelease --stacktrace
 
-      - name: Rename APK with tag
+      - name: Rename artifacts with tag
         id: artifact
         run: |
           mkdir -p dist
           cp app/build/outputs/apk/release/app-release.apk \
              "dist/KumaCheck-${{ steps.tag.outputs.name }}.apk"
-          echo "path=dist/KumaCheck-${{ steps.tag.outputs.name }}.apk" >> "$GITHUB_OUTPUT"
+          cp app/build/outputs/bundle/release/app-release.aab \
+             "dist/KumaCheck-${{ steps.tag.outputs.name }}.aab"
+          echo "apk_path=dist/KumaCheck-${{ steps.tag.outputs.name }}.apk" >> "$GITHUB_OUTPUT"
+          echo "aab_path=dist/KumaCheck-${{ steps.tag.outputs.name }}.aab" >> "$GITHUB_OUTPUT"
 
       - name: Verify APK signature
         run: |
           BUILD_TOOLS=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n1)
           "$ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner" verify --verbose \
-            "${{ steps.artifact.outputs.path }}"
+            "${{ steps.artifact.outputs.apk_path }}"
 
       - name: Wipe keystore from runner
         if: always()
         run: rm -f "$RUNNER_TEMP/release.keystore"
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: ${{ steps.tag.outputs.name }}
           generate_release_notes: true
-          files: ${{ steps.artifact.outputs.path }}
+          files: |
+            ${{ steps.artifact.outputs.apk_path }}
+            ${{ steps.artifact.outputs.aab_path }}
           fail_on_unmatched_files: true

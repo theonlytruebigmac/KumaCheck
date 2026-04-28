@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,6 +42,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -48,6 +52,7 @@ import androidx.core.content.ContextCompat
 import app.kumacheck.data.auth.ThemeMode
 import app.kumacheck.data.socket.KumaSocket
 import app.kumacheck.notify.Notifications
+import app.kumacheck.ui.common.KumaTimePickerDialog
 import app.kumacheck.ui.theme.*
 
 @Composable
@@ -58,10 +63,71 @@ fun SettingsScreen(
     onOpenManageList: () -> Unit,
     onAddServer: () -> Unit,
 ) {
-    val ui by vm.state.collectAsState()
-    val signedOut by vm.signedOut.collectAsState()
+    val ui by vm.state.collectAsStateWithLifecycle()
+    val signedOut by vm.signedOut.collectAsStateWithLifecycle()
 
     LaunchedEffect(signedOut) { if (signedOut) onSignedOut() }
+
+    // ST1: explicit confirmation dialogs for sign-out and per-server delete.
+    // Both actions are one-tap and irreversible (sign-out drops the active
+    // session; remove drops the server entry + all per-server prefs);
+    // an accidental tap shouldn't be all it takes.
+    var confirmSignOut by remember { mutableStateOf(false) }
+    var confirmRemove by remember {
+        mutableStateOf<app.kumacheck.data.auth.ServerEntry?>(null)
+    }
+
+    if (confirmSignOut) {
+        AlertDialog(
+            onDismissRequest = { confirmSignOut = false },
+            title = { Text("Sign out?") },
+            text = {
+                Text(
+                    "This clears the session token for the active server and " +
+                        "stops the foreground monitor service. You'll need to " +
+                        "sign in again next time.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmSignOut = false
+                    vm.signOut()
+                }) { Text("Sign out", color = KumaDown) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmSignOut = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    confirmRemove?.let { pending ->
+        val isLast = ui.servers.size <= 1
+        AlertDialog(
+            onDismissRequest = { confirmRemove = null },
+            title = { Text(if (isLast) "Remove your only server?" else "Remove this server?") },
+            text = {
+                Text(
+                    if (isLast) {
+                        "This drops the server entry and signs you out — there " +
+                            "are no other saved servers to fall back to."
+                    } else {
+                        "This drops \"${pending.url}\" and its saved session, " +
+                            "pins, and mute state. Other servers stay intact."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val id = pending.id
+                    confirmRemove = null
+                    vm.removeServer(id)
+                }) { Text("Remove", color = KumaDown) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemove = null }) { Text("Cancel") }
+            },
+        )
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().background(KumaCream).padding(horizontal = 16.dp),
@@ -74,6 +140,18 @@ fun SettingsScreen(
             item { Spacer(Modifier.height(4.dp)) }
             item { PlaintextTokenBanner() }
         }
+        if (ui.keystoreUnavailableForWrite) {
+            item { Spacer(Modifier.height(4.dp)) }
+            item { KeystoreUnavailableBanner() }
+        }
+        if (ui.activeServerInsecureCleartext) {
+            item { Spacer(Modifier.height(4.dp)) }
+            item { InsecureCleartextBanner() }
+        }
+        ui.migrationFailure?.let { msg ->
+            item { Spacer(Modifier.height(4.dp)) }
+            item { MigrationFailureBanner(msg) }
+        }
 
         item { Spacer(Modifier.height(4.dp)) }
         item { KumaSectionHeader("Server") }
@@ -84,7 +162,7 @@ fun SettingsScreen(
                     server = server,
                     isActive = server.id == ui.activeServerId,
                     onSwitch = { vm.switchServer(server.id) },
-                    onRemove = { vm.removeServer(server.id) },
+                    onRemove = { confirmRemove = server },
                 )
             }
         }
@@ -135,7 +213,7 @@ fun SettingsScreen(
         item { AboutCard(ui) }
 
         item { Spacer(Modifier.height(8.dp)) }
-        item { SignOutButton(onClick = vm::signOut) }
+        item { SignOutButton(onClick = { confirmSignOut = true }) }
         item { Spacer(Modifier.height(24.dp)) }
     }
 }
@@ -174,7 +252,7 @@ private fun PlaintextTokenBanner() {
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp,
+                    fontSize = KumaTypography.bodyEmphasis,
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
@@ -183,7 +261,139 @@ private fun PlaintextTokenBanner() {
                         "The warning will clear automatically once the keystore is healthy on next sign-in.",
                     color = KumaSlate,
                     fontFamily = KumaFont,
-                    fontSize = 12.sp,
+                    fontSize = KumaTypography.captionLarge,
+                    lineHeight = 16.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun KeystoreUnavailableBanner() {
+    // S1: surfaced when [KumaPrefs.encodeTokenForStorage] returned null on
+    // the most recent write attempt — the in-memory token is fine for
+    // this session but won't survive a restart. Sign-out + sign-in once
+    // the keystore is healthy is the recovery path.
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(KumaCardCorner))
+            .background(KumaWarnBg)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .semantics { liveRegion = LiveRegionMode.Assertive },
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            Icon(
+                imageVector = Icons.Filled.Warning,
+                contentDescription = null,
+                tint = KumaWarn,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text(
+                    "Secure storage unavailable",
+                    color = KumaInk,
+                    fontFamily = KumaFont,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = KumaTypography.bodyEmphasis,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "Your sign-in is held in memory but couldn't be encrypted to disk. " +
+                        "It will be lost when the app restarts. Sign in again once your " +
+                        "device's keystore is healthy.",
+                    color = KumaSlate,
+                    fontFamily = KumaFont,
+                    fontSize = KumaTypography.captionLarge,
+                    lineHeight = 16.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun InsecureCleartextBanner() {
+    // S2: surfaced when the active server URL is `http://` and the host
+    // doesn't look LAN-private (see [isInsecureCleartextUrl]). The login
+    // screen warns once at sign-in; this re-asserts every session in case
+    // the user followed a phishing redirect to `http://attacker.com:3001`.
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(KumaCardCorner))
+            .background(KumaWarnBg)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite },
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            Icon(
+                imageVector = Icons.Filled.Warning,
+                contentDescription = null,
+                tint = KumaWarn,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text(
+                    "Cleartext server",
+                    color = KumaInk,
+                    fontFamily = KumaFont,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = KumaTypography.bodyEmphasis,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "This server uses http:// over a non-private host. Your " +
+                        "session token is sent unencrypted. Switch to https:// " +
+                        "if you didn't intend this.",
+                    color = KumaSlate,
+                    fontFamily = KumaFont,
+                    fontSize = KumaTypography.captionLarge,
+                    lineHeight = 16.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MigrationFailureBanner(message: String) {
+    // O3: a startup migration threw. The user's session may not have come
+    // through cleanly; signing out + back in is the recovery path. We
+    // include the underlying error message to help with bug reports.
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(KumaCardCorner))
+            .background(KumaWarnBg)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .semantics { liveRegion = LiveRegionMode.Assertive },
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            Icon(
+                imageVector = Icons.Filled.Warning,
+                contentDescription = null,
+                tint = KumaWarn,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text(
+                    "Session migration failed",
+                    color = KumaInk,
+                    fontFamily = KumaFont,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = KumaTypography.bodyEmphasis,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "$message Sign out and sign back in to recover.",
+                    color = KumaSlate,
+                    fontFamily = KumaFont,
+                    fontSize = KumaTypography.captionLarge,
                     lineHeight = 16.sp,
                 )
             }
@@ -199,7 +409,7 @@ private fun SettingsHeader() {
             color = KumaSlate2,
             fontFamily = KumaMono,
             fontWeight = FontWeight.SemiBold,
-            fontSize = 11.sp,
+            fontSize = KumaTypography.caption,
             letterSpacing = 0.6.sp,
         )
         Spacer(Modifier.height(2.dp))
@@ -208,7 +418,7 @@ private fun SettingsHeader() {
             color = KumaInk,
             fontFamily = KumaFont,
             fontWeight = FontWeight.Bold,
-            fontSize = 28.sp,
+            fontSize = KumaTypography.display,
             letterSpacing = (-0.6).sp,
         )
     }
@@ -260,14 +470,14 @@ private fun ServerCard(ui: SettingsViewModel.UiState) {
                         color = statusColor,
                         fontFamily = KumaFont,
                         fontWeight = FontWeight.Medium,
-                        fontSize = 12.sp,
+                        fontSize = KumaTypography.captionLarge,
                     )
                     if (ui.username != null) {
                         Text(
                             "  ·  ${ui.username}",
                             color = KumaSlate2,
                             fontFamily = KumaFont,
-                            fontSize = 12.sp,
+                            fontSize = KumaTypography.captionLarge,
                         )
                     }
                 }
@@ -302,14 +512,14 @@ private fun ServerRow(
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium,
-                    fontSize = 13.sp,
+                    fontSize = KumaTypography.body,
                     maxLines = 1,
                 )
                 Text(
                     server.username ?: "no session",
                     color = KumaSlate2,
                     fontFamily = KumaFont,
-                    fontSize = 11.sp,
+                    fontSize = KumaTypography.caption,
                 )
             }
             if (isActive) {
@@ -363,7 +573,7 @@ private fun AddServerEntry(onClick: () -> Unit) {
                 color = KumaInk,
                 fontFamily = KumaFont,
                 fontWeight = FontWeight.Medium,
-                fontSize = 14.sp,
+                fontSize = KumaTypography.bodyEmphasis,
                 modifier = Modifier.weight(1f),
             )
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -391,6 +601,29 @@ private fun NotificationsCard(
     // point launcher.launch returns immediately without showing a dialog,
     // so we send them to the system app-notification settings instead.
     var permanentlyDenied by remember { mutableStateOf(false) }
+
+    // ST2: re-check POST_NOTIFICATIONS on every RESUME and auto-correct the
+    // prefs flag if the user revoked permission while we were paused (system
+    // settings, system notification long-press → "Disable", etc.). Without
+    // this the toggle visually shows "off" via `notificationsEnabled &&
+    // hasPostPerm` while prefs still say true — KumaCheckApp keeps the
+    // service alive and every nm.notify() silently no-ops.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                    ContextCompat.checkSelfPermission(
+                        ctx, Manifest.permission.POST_NOTIFICATIONS,
+                    ) == PackageManager.PERMISSION_GRANTED
+                hasPostPerm = granted
+                if (!granted && ui.notificationsEnabled) onToggle(false)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -438,7 +671,7 @@ private fun NotificationsCard(
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp,
+                    fontSize = KumaTypography.bodyEmphasis,
                 )
                 Text(
                     when {
@@ -450,7 +683,7 @@ private fun NotificationsCard(
                     },
                     color = if (showPermWarning) KumaDown else KumaSlate2,
                     fontFamily = KumaFont,
-                    fontSize = 12.sp,
+                    fontSize = KumaTypography.captionLarge,
                 )
             }
             Spacer(Modifier.width(8.dp))
@@ -511,13 +744,13 @@ private fun QuietHoursCard(
                         color = KumaInk,
                         fontFamily = KumaFont,
                         fontWeight = FontWeight.SemiBold,
-                        fontSize = 14.sp,
+                        fontSize = KumaTypography.bodyEmphasis,
                     )
                     Text(
                         "Silence alerts during a daily window",
                         color = KumaSlate2,
                         fontFamily = KumaFont,
-                        fontSize = 12.sp,
+                        fontSize = KumaTypography.captionLarge,
                     )
                 }
                 Switch(
@@ -552,14 +785,14 @@ private fun QuietHoursCard(
     }
 
     if (showStart) {
-        TimePickerDialog(
+        KumaTimePickerDialog(
             initialMinuteOfDay = startMinute,
             onConfirm = { onStartChange(it); showStart = false },
             onDismiss = { showStart = false },
         )
     }
     if (showEnd) {
-        TimePickerDialog(
+        KumaTimePickerDialog(
             initialMinuteOfDay = endMinute,
             onConfirm = { onEndChange(it); showEnd = false },
             onDismiss = { showEnd = false },
@@ -588,7 +821,7 @@ private fun QuietHoursTimeSlot(
                 label,
                 color = KumaSlate2,
                 fontFamily = KumaFont,
-                fontSize = 11.sp,
+                fontSize = KumaTypography.caption,
                 fontWeight = FontWeight.Medium,
             )
             Text(
@@ -596,55 +829,8 @@ private fun QuietHoursTimeSlot(
                 color = KumaInk,
                 fontFamily = KumaMono,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 16.sp,
+                fontSize = KumaTypography.title,
             )
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun TimePickerDialog(
-    initialMinuteOfDay: Int,
-    onConfirm: (Int) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val state = rememberTimePickerState(
-        initialHour = initialMinuteOfDay / 60,
-        initialMinute = initialMinuteOfDay % 60,
-        is24Hour = android.text.format.DateFormat.is24HourFormat(LocalContext.current),
-    )
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = KumaSurface,
-            modifier = Modifier.padding(16.dp),
-        ) {
-            Column(Modifier.padding(16.dp)) {
-                Text(
-                    "Pick a time",
-                    color = KumaInk,
-                    fontFamily = KumaFont,
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(bottom = 12.dp),
-                )
-                TimePicker(state = state)
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    TextButton(onClick = onDismiss) {
-                        Text("Cancel", color = KumaSlate2, fontFamily = KumaFont)
-                    }
-                    TextButton(onClick = { onConfirm(state.hour * 60 + state.minute) }) {
-                        Text(
-                            "OK", color = KumaTerra,
-                            fontWeight = FontWeight.SemiBold, fontFamily = KumaFont,
-                        )
-                    }
-                }
-            }
         }
     }
 }
@@ -677,14 +863,14 @@ private fun SendTestEntry() {
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = FontWeight.Medium,
-                    fontSize = 14.sp,
+                    fontSize = KumaTypography.bodyEmphasis,
                 )
                 if (lastResultMsg != null) {
                     Text(
                         lastResultMsg!!,
                         color = if (lastResultMsg!!.startsWith("Permission")) KumaDown else KumaSlate2,
                         fontFamily = KumaFont,
-                        fontSize = 12.sp,
+                        fontSize = KumaTypography.captionLarge,
                     )
                 }
             }
@@ -760,7 +946,7 @@ private fun ThemeModeChip(
                 color = if (selected) KumaTerra2 else KumaInk,
                 fontFamily = KumaFont,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                fontSize = 12.sp,
+                fontSize = KumaTypography.captionLarge,
             )
         }
     }
@@ -792,13 +978,13 @@ private fun NavEntry(
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp,
+                    fontSize = KumaTypography.bodyEmphasis,
                 )
                 Text(
                     subtitle,
                     color = KumaSlate2,
                     fontFamily = KumaFont,
-                    fontSize = 12.sp,
+                    fontSize = KumaTypography.captionLarge,
                 )
             }
             Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -839,14 +1025,14 @@ private fun AboutRow(label: String, value: String) {
             label,
             color = KumaInk,
             fontFamily = KumaFont,
-            fontSize = 13.sp,
+            fontSize = KumaTypography.body,
             modifier = Modifier.weight(1f),
         )
         Text(
             value,
             color = KumaSlate2,
             fontFamily = KumaMono,
-            fontSize = 12.sp,
+            fontSize = KumaTypography.captionLarge,
         )
     }
 }
@@ -885,7 +1071,7 @@ private fun SignOutButton(onClick: () -> Unit) {
                 color = KumaDown,
                 fontFamily = KumaFont,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 14.sp,
+                fontSize = KumaTypography.bodyEmphasis,
             )
         }
     }

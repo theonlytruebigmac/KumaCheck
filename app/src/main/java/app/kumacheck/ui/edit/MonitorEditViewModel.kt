@@ -7,6 +7,7 @@ import app.kumacheck.data.socket.KumaSocket
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -114,10 +115,21 @@ class MonitorEditViewModel(
                 // `original` on later pushes because that would shift the
                 // user's baseline mid-edit (e.g. flipping originalAuthMethod
                 // under their feet).
-                val firstMap = socket.monitors.first { it.containsKey(monitorId) }
-                val firstM = firstMap[monitorId] ?: return@launch
-                val raw = socket.monitorsRaw.value[monitorId]
-                val initial = formFromRaw(firstM, raw)
+                //
+                // V2: combine `monitors` and `monitorsRaw` so we wait until
+                // both flows have the id before initialising. Pre-fix, a
+                // `monitorsRaw` lag (typed-and-raw maps are populated by the
+                // same `monitorList` push but emitted via separate
+                // MutableStateFlows) could leave round-trip-only fields
+                // (notification ids, headers, auth method, etc.) blank in
+                // the form's first paint.
+                val (firstM, firstRaw) = combine(
+                    socket.monitors,
+                    socket.monitorsRaw,
+                ) { m, r -> m[monitorId] to r[monitorId] }
+                    .first { (m, _) -> m != null }
+                if (firstM == null) return@launch
+                val initial = formFromRaw(firstM, firstRaw)
                 _state.update { it.copy(monitor = firstM, form = initial, original = initial) }
                 // Then track live updates to the `monitor` reference only —
                 // form / original stay frozen at entry.
@@ -281,6 +293,16 @@ class MonitorEditViewModel(
 
         if (cur.form.name.isBlank()) {
             _state.update { it.copy(error = "Name is required") }
+            return
+        }
+        // Per-type required-field check. The payload builder seeds safe
+        // defaults for optional fields, but the user-supplied identity
+        // fields below are what determine "what does this monitor probe?"
+        // — a blank value here would server-validate cleanly but produce
+        // a monitor that DOWNs forever with an opaque "no host" message.
+        // Surface a clear error up-front instead.
+        validateRequiredTypeFields(cur.form)?.let { msg ->
+            _state.update { it.copy(error = msg) }
             return
         }
         // For HTTP-style monitors only, the headers + status-codes fields are
@@ -458,6 +480,54 @@ class MonitorEditViewModel(
  * for create, or a clone of the raw round-trip blob for edit). Lives at the top
  * level so unit tests can call it without a real socket harness.
  */
+/**
+ * Per-type required-field validator. Returns null when every field the
+ * Kuma 2.x runtime monitor.js needs to actually probe the target is
+ * present, else a user-facing error string.
+ *
+ * Mirrors the runtime requirements pulled from Kuma 2.2.1's
+ * `server/model/monitor.js` and the per-type `monitor-types`
+ * `check()` functions. The payload builder also seeds safe defaults
+ * for *secondary* fields (port, dns_resolve_*, etc.); this validator
+ * only catches the user-facing identity fields the monitor probes.
+ *
+ * Top-level so unit tests can exercise it without a coroutine /
+ * socket harness — the error strings are part of the contract.
+ */
+internal fun validateRequiredTypeFields(f: MonitorEditViewModel.Form): String? = when (f.type) {
+    "http", "keyword", "json-query" -> when {
+        f.url.isBlank() -> "URL is required"
+        f.type == "keyword" && f.keyword.isBlank() -> "Keyword is required"
+        f.type == "json-query" && f.jsonPath.isBlank() -> "JSON path is required"
+        else -> null
+    }
+    "ping", "tailscale-ping" ->
+        if (f.hostname.isBlank()) "Hostname is required" else null
+    "port", "steam", "gamedig" ->
+        if (f.hostname.isBlank()) "Hostname is required" else null
+    "dns" ->
+        if (f.hostname.isBlank()) "Hostname is required" else null
+    "mqtt" -> when {
+        f.hostname.isBlank() -> "Hostname is required"
+        f.mqttTopic.isBlank() -> "MQTT topic is required"
+        else -> null
+    }
+    "grpc-keyword" -> when {
+        f.grpcUrl.isBlank() -> "gRPC URL is required"
+        f.grpcServiceName.isBlank() -> "Service name is required"
+        f.grpcMethod.isBlank() -> "Method is required"
+        f.keyword.isBlank() -> "Keyword is required"
+        else -> null
+    }
+    "kafka-producer" -> when {
+        f.kafkaProducerBrokers.isBlank() -> "At least one broker is required"
+        f.kafkaProducerTopic.isBlank() -> "Topic is required"
+        f.kafkaProducerMessage.isBlank() -> "Message is required"
+        else -> null
+    }
+    else -> null  // Unknown type — let the server validate.
+}
+
 internal fun buildMonitorPayload(
     into: JSONObject,
     form: MonitorEditViewModel.Form,
@@ -473,6 +543,27 @@ internal fun buildMonitorPayload(
         if (!into.has("retryInterval")) into.put("retryInterval", 60)
         if (!into.has("maxretries")) into.put("maxretries", 0)
         if (!into.has("resendInterval")) into.put("resendInterval", 0)
+        // Kuma's server-side `add` handler iterates these two arrays with
+        // `.every()` unconditionally — it doesn't gate them on monitor
+        // type. A `ping` (or `port`, `dns`, etc.) monitor that omits them
+        // entirely server-crashes with "cannot read properties of
+        // undefined (reading 'every')". Always seed empty arrays here so
+        // the type-specific block below only has to set them when the
+        // type actually consumes the values (HTTP-style monitors).
+        if (!into.has("accepted_statuscodes")) {
+            into.put("accepted_statuscodes", JSONArray(listOf("200-299")))
+        }
+        if (!into.has("notificationIDList")) {
+            into.put("notificationIDList", JSONArray())
+        }
+        // Kuma 2.x's `monitor.conditions` column has a NOT NULL constraint.
+        // The server's `add` handler does `monitor.conditions =
+        // JSON.stringify(monitor.conditions)` — undefined → undefined →
+        // NULL → "SQLITE_CONSTRAINT: NOT NULL constraint failed:
+        // monitor.conditions". Send an empty array on every create.
+        if (!into.has("conditions")) {
+            into.put("conditions", JSONArray())
+        }
     }
     form.interval.toIntOrNull()?.let { into.put("interval", it) }
     form.retryInterval.toIntOrNull()?.let { into.put("retryInterval", it) }
@@ -556,7 +647,11 @@ internal fun buildMonitorPayload(
         }
         "port", "steam", "gamedig" -> {
             into.put("hostname", form.hostname.trim())
-            form.port.toIntOrNull()?.let { into.put("port", it) }
+            // Required by the runtime check; default matches Kuma's web UI
+            // placeholder. Without this, a port-type monitor created with
+            // a blank port field fails its first heartbeat with an opaque
+            // "port is undefined" error instead of probing 80.
+            into.put("port", form.port.toIntOrNull() ?: 80)
         }
         "ping", "tailscale-ping" -> {
             into.put("hostname", form.hostname.trim())
@@ -564,17 +659,25 @@ internal fun buildMonitorPayload(
         }
         "dns" -> {
             into.put("hostname", form.hostname.trim())
-            form.port.toIntOrNull()?.let { into.put("port", it) }
-            if (form.dnsResolveServer.isNotBlank()) {
-                into.put("dns_resolve_server", form.dnsResolveServer.trim())
-            }
-            if (form.dnsResolveType.isNotBlank()) {
-                into.put("dns_resolve_type", form.dnsResolveType)
-            }
+            // dns_resolve_type / dns_resolve_server are read by the dns
+            // monitor type's check() unconditionally — a blank field
+            // explodes the check. Defaults match Kuma's UI placeholders
+            // ("A" record over 1.1.1.1, port 53). User-typed values
+            // override.
+            into.put("port", form.port.toIntOrNull() ?: 53)
+            into.put(
+                "dns_resolve_server",
+                form.dnsResolveServer.trim().ifBlank { "1.1.1.1" },
+            )
+            into.put(
+                "dns_resolve_type",
+                form.dnsResolveType.ifBlank { "A" },
+            )
         }
         "mqtt" -> {
             into.put("hostname", form.hostname.trim())
-            form.port.toIntOrNull()?.let { into.put("port", it) }
+            // MQTT default broker port — see comment on `port` above.
+            into.put("port", form.port.toIntOrNull() ?: 1883)
             into.put("mqttUsername", form.mqttUsername)
             into.put("mqttPassword", form.mqttPassword)
             into.put("mqttTopic", form.mqttTopic)

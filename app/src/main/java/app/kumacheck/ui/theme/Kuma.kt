@@ -1,5 +1,7 @@
 package app.kumacheck.ui.theme
 
+import app.kumacheck.ui.theme.KumaTypography
+
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -146,7 +148,7 @@ fun KumaSectionHeader(
             text.uppercase(),
             color = color,
             fontFamily = KumaMono,
-            fontSize = 11.sp,
+            fontSize = KumaTypography.caption,
             fontWeight = FontWeight.SemiBold,
             letterSpacing = 0.6.sp,
         )
@@ -197,10 +199,29 @@ fun StatusDot(
     }
 }
 
+/**
+ * Shared pulse alpha. Read by every [StatusDot] with `pulse = true` so the
+ * whole screen drives one infinite animation instead of N — pre-fix, a
+ * Monitors / Manage / Overview list with 60+ UP rows allocated 60+
+ * `rememberInfiniteTransition`s, each producing a fresh alpha at 60 Hz,
+ * which dominated the main thread during scroll.
+ *
+ * Default is a non-animating [androidx.compose.runtime.mutableStateOf]
+ * so previews and unit tests don't need a CompositionLocal provider.
+ * Real screens override via [PulseAlphaProvider] at the root.
+ */
+val LocalPulseAlpha = androidx.compose.runtime.staticCompositionLocalOf {
+    androidx.compose.runtime.mutableFloatStateOf(1f) as androidx.compose.runtime.State<Float>
+}
+
+/**
+ * Wrap the screen root in this to drive the single shared pulse animation
+ * everyone reads via [LocalPulseAlpha]. One transition for the whole tree.
+ */
 @Composable
-private fun rememberPulse(): androidx.compose.runtime.State<Float> {
+fun PulseAlphaProvider(content: @Composable () -> Unit) {
     val transition = rememberInfiniteTransition(label = "kc-pulse")
-    return transition.animateFloat(
+    val alpha = transition.animateFloat(
         initialValue = 1f,
         targetValue = 0f,
         animationSpec = infiniteRepeatable(
@@ -209,7 +230,13 @@ private fun rememberPulse(): androidx.compose.runtime.State<Float> {
         ),
         label = "pulseAlpha",
     )
+    androidx.compose.runtime.CompositionLocalProvider(LocalPulseAlpha provides alpha) {
+        content()
+    }
 }
+
+@Composable
+private fun rememberPulse(): androidx.compose.runtime.State<Float> = LocalPulseAlpha.current
 
 @Composable
 fun StatusBadge(

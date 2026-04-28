@@ -1,5 +1,7 @@
 package app.kumacheck.ui.maintenance
 
+import app.kumacheck.util.stateInVm
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.kumacheck.data.socket.KumaSocket
@@ -80,7 +82,7 @@ class MaintenanceDetailViewModel(
             deleted = values[6] as Boolean,
             error = values[7] as? String,
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
+    }.stateInVm(this, UiState())
 
     fun toggleActive(active: Boolean) {
         if (_toggling.value) return

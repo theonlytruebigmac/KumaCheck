@@ -1,5 +1,7 @@
 package app.kumacheck.ui.monitors
 
+import app.kumacheck.util.stateInVm
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.kumacheck.data.model.Heartbeat
@@ -61,7 +63,7 @@ class MonitorsViewModel(private val socket: KumaSocket) : ViewModel() {
         _query,
     ) { monitors, beats, uptime, filter, query ->
         compute(monitors, beats, uptime, filter, query)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
+    }.stateInVm(this, UiState())
 
     fun setFilter(f: Filter) { _filter.value = f }
     fun setQuery(q: String) { _query.value = q }
@@ -111,7 +113,7 @@ class MonitorsViewModel(private val socket: KumaSocket) : ViewModel() {
                 status = statusFor(m),
                 lastPingMs = beats[m.id]?.ping,
                 uptime24h = uptimeMap[m.id]?.get("24") ?: uptimeMap[m.id]?.get("1"),
-                lastBeatMs = parseBeatTime(beats[m.id]?.time),
+                lastBeatMs = beats[m.id]?.let { it.timeMs ?: parseBeatTime(it.time) },
             )
         }
 

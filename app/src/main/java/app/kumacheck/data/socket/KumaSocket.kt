@@ -148,9 +148,31 @@ class KumaSocket {
     /** TLS certificate info for HTTPS monitors. Populated by Kuma's `certInfo` socket event. */
     data class CertInfo(
         val valid: Boolean,
+        /** Server-cached value at last `certInfo` push. Used as a fallback by [daysRemainingNow]. */
         val daysRemaining: Int?,
         val validTo: String?,
-    )
+        /**
+         * P5: validTo parsed once on ingest. Kuma typically only re-pushes
+         * certInfo on cert refresh (~24h cadence), so a long-running app
+         * would otherwise show a stale "10 days" warning that should now
+         * read "3 days." [daysRemainingNow] re-derives the figure from
+         * `now`, falling back to the server-cached [daysRemaining] when
+         * we couldn't parse `validTo`.
+         */
+        val validToMillis: Long? = null,
+    ) {
+        fun daysRemainingNow(now: Long = System.currentTimeMillis()): Int? {
+            if (validToMillis != null) {
+                val diff = validToMillis - now
+                return (diff / DAY_MS).toInt().coerceAtLeast(0)
+            }
+            return daysRemaining
+        }
+
+        private companion object {
+            const val DAY_MS = 24L * 60 * 60 * 1000
+        }
+    }
 
     private val _certInfo = MutableStateFlow<Map<Int, CertInfo>>(emptyMap())
     val certInfo: StateFlow<Map<Int, CertInfo>> = _certInfo.asStateFlow()
@@ -175,8 +197,41 @@ class KumaSocket {
     private val _errors = MutableSharedFlow<String>(extraBufferCapacity = 32)
     val errors: SharedFlow<String> = _errors.asSharedFlow()
 
+    /**
+     * Server-pushed monitor deletions. Emits the deleted monitor id whenever
+     * the server fires `deleteMonitorFromList` (or our explicit
+     * `deleteMonitor` RPC succeeds). Consumers — e.g. [KumaCheckApp] — use
+     * this to clean up per-monitor persisted state (pin / mute / ack /
+     * incident log) that the socket-level [_monitors] cache prune doesn't
+     * reach.
+     */
+    private val _monitorDeletes = MutableSharedFlow<Int>(extraBufferCapacity = 32)
+    val monitorDeletes: SharedFlow<Int> = _monitorDeletes.asSharedFlow()
+
     @Volatile
     private var socket: Socket? = null
+
+    /**
+     * Generation counter for the current Socket. Bumped on every
+     * connect/reconnect/disconnect so K3's stale-handler guard in
+     * [wireEvents] can ignore events that the io.socket dispatcher had
+     * already queued for the *previous* incarnation when we tore it down.
+     * Read without locking — values are monotonic and listener comparisons
+     * are equality, so a torn read can only mean "we're stale" (correct).
+     */
+    @Volatile
+    private var socketGeneration: Int = 0
+
+    /**
+     * K4: serialise connect / reconnect / disconnect against each other.
+     * `connect` and `reconnect` both call `disconnectInternal` then
+     * overwrite `socket`; without this lock, two concurrent callers
+     * (pull-to-refresh + switch-active-server, in some hypothetical
+     * future) could interleave their disconnect/assign sequences and
+     * register handlers on a socket the other call had already swapped
+     * out.
+     */
+    private val socketLifecycleLock = Any()
 
     /**
      * In-flight ack continuations from [call] / [callPositional]. Tracked so
@@ -187,24 +242,32 @@ class KumaSocket {
     private val pendingCalls = CopyOnWriteArraySet<CancellableContinuation<JSONObject>>()
 
     fun connect(serverUrl: String) {
-        disconnectInternal(clearState = true)
-        setConnection(Connection.CONNECTING)
-        currentUrl = serverUrl
-        val opts = IO.Options().apply {
-            reconnection = true
-            reconnectionDelay = 2_000
-            reconnectionDelayMax = 30_000
-            timeout = 15_000
-            // NW7: bypass IO's per-URL Manager cache. The cache is what
-            // accumulates engine.io listeners across reconnects (each
-            // connect/disconnect cycle adds another set, leaks linearly with
-            // reconnect count). forceNew makes every IO.socket allocate a
-            // fresh Manager so the prior one is GC-eligible.
-            forceNew = true
+        val s = synchronized(socketLifecycleLock) {
+            disconnectInternal(clearState = true)
+            setConnection(Connection.CONNECTING)
+            currentUrl = serverUrl
+            val opts = IO.Options().apply {
+                reconnection = true
+                reconnectionDelay = 2_000
+                reconnectionDelayMax = 30_000
+                timeout = 15_000
+                // NW7: bypass IO's per-URL Manager cache. The cache is what
+                // accumulates engine.io listeners across reconnects (each
+                // connect/disconnect cycle adds another set, leaks linearly with
+                // reconnect count). forceNew makes every IO.socket allocate a
+                // fresh Manager so the prior one is GC-eligible.
+                forceNew = true
+            }
+            val s = IO.socket(serverUrl.trimEnd('/'), opts)
+            socket = s
+            val gen = ++socketGeneration
+            wireEvents(s, gen)
+            s
         }
-        val s = IO.socket(serverUrl.trimEnd('/'), opts)
-        socket = s
-        wireEvents(s)
+        // s.connect() is safe to invoke outside the lock — Socket.IO does
+        // its own queuing — and keeping the I/O kick-off out of the
+        // critical section means a slow DNS lookup can't stall a
+        // concurrent disconnect.
         s.connect()
     }
 
@@ -215,46 +278,68 @@ class KumaSocket {
      * monitorList replaces it on reconnect.
      */
     fun reconnect(): Boolean {
-        val url = currentUrl ?: return false
-        disconnectInternal(clearState = false)
-        setConnection(Connection.CONNECTING)
-        currentUrl = url
-        val opts = IO.Options().apply {
-            reconnection = true
-            reconnectionDelay = 2_000
-            reconnectionDelayMax = 30_000
-            timeout = 15_000
-            forceNew = true  // see connect() for rationale
+        val s = synchronized(socketLifecycleLock) {
+            val url = currentUrl ?: return false
+            disconnectInternal(clearState = false)
+            setConnection(Connection.CONNECTING)
+            currentUrl = url
+            val opts = IO.Options().apply {
+                reconnection = true
+                reconnectionDelay = 2_000
+                reconnectionDelayMax = 30_000
+                timeout = 15_000
+                forceNew = true  // see connect() for rationale
+            }
+            val s = IO.socket(url.trimEnd('/'), opts)
+            socket = s
+            val gen = ++socketGeneration
+            wireEvents(s, gen)
+            s
         }
-        val s = IO.socket(url.trimEnd('/'), opts)
-        socket = s
-        wireEvents(s)
         s.connect()
         return true
     }
 
-    private fun wireEvents(s: Socket) {
-        s.on(Socket.EVENT_CONNECT) {
+    private fun wireEvents(s: Socket, generation: Int) {
+        // K3: every listener captures `generation`; if a later
+        // connect/reconnect/disconnect has bumped [socketGeneration], we're
+        // stale and must not mutate state any more. Without this, an event
+        // whose dispatch was queued before disconnectInternal could call
+        // s.off() can still land — and the closure would happily mutate
+        // _latestBeat / _recentBeats after `socket = null`. Keep the
+        // wrapper as a local lambda so each handler stays a single-line
+        // s.on(event) { … } at the call site.
+        val on: (String, (Array<Any?>) -> Unit) -> Unit = { event, block ->
+            s.on(event) { args ->
+                // io.socket's Listener gives us Array<Any> (Java Object[]),
+                // but our handlers were authored against Array<Any?> via
+                // KumaJson — widen here so the existing call sites compile
+                // unchanged. The varargs slot can never be null in
+                // practice; the cast is just shape-matching.
+                @Suppress("UNCHECKED_CAST")
+                if (socketGeneration == generation) block(args as Array<Any?>)
+            }
+        }
+        on(Socket.EVENT_CONNECT) {
             Log.i(TAG, "connected: sid=${s.id()}")
             setConnection(Connection.CONNECTED)
         }
-        s.on(Socket.EVENT_DISCONNECT) {
+        on(Socket.EVENT_DISCONNECT) {
             Log.i(TAG, "disconnected: ${it.firstOrNull()}")
             setConnection(Connection.DISCONNECTED)
         }
-        s.on(Socket.EVENT_CONNECT_ERROR) {
+        on(Socket.EVENT_CONNECT_ERROR) {
             val msg = it.firstOrNull()?.toString() ?: "connect error"
             Log.w(TAG, "connect error: $msg")
             setConnection(Connection.ERROR)
             _errors.tryEmit(msg)
         }
-        s.on("loginRequired") {
+        on("loginRequired") {
             Log.i(TAG, "loginRequired")
             setConnection(Connection.LOGIN_REQUIRED)
         }
-        s.on("info") {
+        on("info") {
             val o = it.firstOrNull() as? JSONObject
-            Log.i(TAG, "info: $o")
             if (o != null) {
                 val incoming = ServerInfo(
                     primaryBaseURL = o.optString("primaryBaseURL").takeIf { s -> s.isNotEmpty() },
@@ -264,6 +349,10 @@ class KumaSocket {
                     dbType = o.optString("dbType").takeIf { s -> s.isNotEmpty() },
                     timezone = o.optString("serverTimezone").takeIf { s -> s.isNotEmpty() },
                 )
+                // S3: log only the fields we model. The raw JSONObject can
+                // carry whatever a forked/malicious server stuffs into it,
+                // and on Android < 12 logcat is readable to other apps.
+                Log.i(TAG, "info: version=${incoming.version} dbType=${incoming.dbType} tz=${incoming.timezone}")
                 // Merge: prefer non-null fields from new info over previous (post-auth is richer).
                 _serverInfo.update { cur ->
                     if (cur == null) incoming else ServerInfo(
@@ -277,7 +366,7 @@ class KumaSocket {
                 }
             }
         }
-        s.on("statusPageList") { args ->
+        on("statusPageList") { args ->
             val obj = args.firstOrNull() as? JSONObject ?: return@on
             val out = mutableListOf<app.kumacheck.data.model.StatusPage>()
             val keys = obj.keys()
@@ -298,7 +387,7 @@ class KumaSocket {
             _statusPages.value = out.sortedBy { it.title.lowercase() }
             Log.i(TAG, "statusPageList: ${out.size} pages")
         }
-        s.on("monitorList") { args ->
+        on("monitorList") { args ->
             val obj = args.firstOrNull() as? JSONObject ?: return@on
             val parsed = parseMonitorList(obj)
             _monitors.value = parsed
@@ -312,20 +401,87 @@ class KumaSocket {
                 raw[id] = m
             }
             _monitorsRaw.value = raw
+            // K1: prune parallel maps keyed by monitor id. `monitorList` is a
+            // full replace from the server; without this, deleted monitors'
+            // beats / uptime / cert info linger in memory for the lifetime
+            // of the process. Per-list caps already bound *each* list's
+            // size, but the *number* of monitor keys was unbounded. The
+            // pure helper [pruneToLiveMonitorIds] keeps the rule testable.
+            val live = parsed.keys
+            _latestBeat.update { pruneToLiveMonitorIds(it, live) }
+            _recentBeats.update { pruneToLiveMonitorIds(it, live) }
+            _uptime.update { pruneToLiveMonitorIds(it, live) }
+            _avgPing.update { pruneToLiveMonitorIds(it, live) }
+            _certInfo.update { pruneToLiveMonitorIds(it, live) }
             Log.i(TAG, "monitorList: ${parsed.size} monitors")
         }
-        s.on("heartbeat") { args ->
+        // Kuma 2.x patches the local monitor map without re-pushing the full
+        // `monitorList`. After an `add` or `editMonitor`, the server emits
+        // `updateMonitorIntoList` with a partial `{[id]: monitor}` blob; on
+        // `deleteMonitor` it emits `deleteMonitorFromList` with the id alone.
+        // Without these handlers the monitor list stays stale until the user
+        // pulls to refresh.
+        on("updateMonitorIntoList") { args ->
             val obj = args.firstOrNull() as? JSONObject ?: return@on
-            val hb = runCatching { parseHeartbeat(obj) }.getOrNull() ?: return@on
+            val patch = parseMonitorList(obj)
+            if (patch.isEmpty()) return@on
+            _monitors.update { it + patch }
+            // Index the raw JSON for the patched ids so editMonitor's
+            // round-trip diff still has the latest baseline.
+            val rawPatch = HashMap<Int, JSONObject>(obj.length())
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next() as String
+                val m = obj.optJSONObject(k) ?: continue
+                val id = m.optInt("id", -1).takeIf { it >= 0 } ?: continue
+                rawPatch[id] = m
+            }
+            _monitorsRaw.update { it + rawPatch }
+            Log.i(TAG, "updateMonitorIntoList: patched ${patch.keys}")
+        }
+        on("deleteMonitorFromList") { args ->
+            val raw = args.firstOrNull()
+            val id = when (raw) {
+                is Number -> raw.toInt()
+                is String -> raw.toIntOrNull()
+                else -> null
+            } ?: return@on
+            // Drop the monitor and every parallel map keyed by id, same
+            // way `monitorList` does on full replace (K1).
+            _monitors.update { it - id }
+            _monitorsRaw.update { it - id }
+            _latestBeat.update { it - id }
+            _recentBeats.update { it - id }
+            _uptime.update { it - id }
+            _avgPing.update { it - id }
+            _certInfo.update { it - id }
+            // Notify subscribers (KumaCheckApp wires prefs.forgetMonitor)
+            // so per-monitor persisted state — pin, mute, ack, incident
+            // log — doesn't survive the deletion.
+            _monitorDeletes.tryEmit(id)
+            Log.i(TAG, "deleteMonitorFromList: $id")
+        }
+        on("heartbeat") { args ->
+            val obj = args.firstOrNull() as? JSONObject ?: return@on
+            // O6: surface parse failures to logcat so a malformed payload
+            // (new Kuma field shape, server bug) doesn't disappear silently
+            // and leave the UI showing stale "last seen X ago" forever.
+            val hb = runCatching { parseHeartbeat(obj) }
+                .onFailure { Log.w(TAG, "parse heartbeat failed", it) }
+                .getOrNull() ?: return@on
             _latestBeat.update { it + (hb.monitorId to hb) }
             _beats.tryEmit(hb)
-            _recentBeats.update { cur ->
-                val rolled = (cur[hb.monitorId].orEmpty() + hb).takeLast(MAX_RECENT_BEATS)
-                cur + (hb.monitorId to rolled)
-            }
+            // Q5 / T1: pure-helper rolling window so the cap is unit-testable.
+            _recentBeats.update { appendBeatToRecent(it, hb, MAX_RECENT_BEATS) }
         }
-        s.on("heartbeatList") { args ->
-            val pair = parseHeartbeatList(args) ?: return@on
+        on("heartbeatList") { args ->
+            // O6: route parse failures to logcat so a malformed batch entry
+            // doesn't disappear silently. KumaJson stays JVM-pure (no Log)
+            // because it runs under unit-test classloaders where Log is
+            // unmocked.
+            val pair = parseHeartbeatList(args) { t ->
+                Log.w(TAG, "parse heartbeat in heartbeatList failed", t)
+            } ?: return@on
             val (mid, beats) = pair
             // Third positional arg: `overwrite` flag. See [resolveOverwrite]
             // for the version-aware default. The cached version (from prefs)
@@ -339,11 +495,16 @@ class KumaSocket {
                 liveVersion = _serverInfo.value?.version,
                 cachedVersion = cachedKumaVersionProvider(),
             )
-            val sorted = beats.sortedBy { it.time }
+            // P2: sort/compare via the parsed timeMs, with the raw string as
+            // a stable tiebreak so beats with unparseable timestamps still
+            // get a deterministic ordering.
+            val sorted = beats.sortedWith(compareBy({ it.timeMs ?: Long.MIN_VALUE }, { it.time }))
             sorted.lastOrNull()?.let { latest ->
                 _latestBeat.update { cur ->
                     val existing = cur[mid]
-                    if (existing == null || latest.time > existing.time) cur + (mid to latest)
+                    val existingMs = existing?.timeMs ?: Long.MIN_VALUE
+                    val latestMs = latest.timeMs ?: Long.MIN_VALUE
+                    if (existing == null || latestMs > existingMs) cur + (mid to latest)
                     else cur
                 }
             }
@@ -354,13 +515,14 @@ class KumaSocket {
                     val existing = cur[mid].orEmpty()
                     // Dedupe by `time` since the server may resend overlapping
                     // entries on flap or reconnect; preserve sort order.
-                    (existing + sorted).distinctBy { it.time }.sortedBy { it.time }
+                    (existing + sorted).distinctBy { it.time }
+                        .sortedWith(compareBy({ it.timeMs ?: Long.MIN_VALUE }, { it.time }))
                 }
                 cur + (mid to merged.takeLast(MAX_RECENT_BEATS))
             }
         }
         // uptime is positional: (monitorId, type, value). type is "1"=24h, "720"=30d, etc.
-        s.on("uptime") { args ->
+        on("uptime") { args ->
             val mid = numToInt(args.getOrNull(0)) ?: return@on
             val type = args.getOrNull(1)?.toString() ?: return@on
             val v = numToDouble(args.getOrNull(2)) ?: return@on
@@ -369,12 +531,12 @@ class KumaSocket {
             }
         }
         // avgPing is positional: (monitorId, valueMs)
-        s.on("avgPing") { args ->
+        on("avgPing") { args ->
             val mid = numToInt(args.getOrNull(0)) ?: return@on
             val v = numToDouble(args.getOrNull(1)) ?: return@on
             _avgPing.update { it + (mid to v) }
         }
-        s.on("maintenanceList") { args ->
+        on("maintenanceList") { args ->
             val o = args.firstOrNull() as? JSONObject ?: return@on
             val map = HashMap<Int, Maintenance>(o.length())
             val keys = o.keys()
@@ -386,7 +548,7 @@ class KumaSocket {
             }
             _maintenance.value = map
         }
-        s.on("certInfo") { args ->
+        on("certInfo") { args ->
             val mid = numToInt(args.getOrNull(0)) ?: return@on
             val payload = args.getOrNull(1) ?: return@on
             val obj = when (payload) {
@@ -394,10 +556,15 @@ class KumaSocket {
                 is String -> runCatching { JSONObject(payload) }.getOrNull()
                 else -> null
             } ?: return@on
+            val validToStr = obj.optString("validTo").takeIf { it.isNotEmpty() && it != "null" }
             val info = CertInfo(
                 valid = obj.optBoolean("valid", false),
                 daysRemaining = numToInt(obj.opt("daysRemaining")),
-                validTo = obj.optString("validTo").takeIf { it.isNotEmpty() && it != "null" },
+                validTo = validToStr,
+                // P5: parse ISO `validTo` once at ingest so the UI can re-derive
+                // daysRemaining against `now` instead of trusting a server snapshot
+                // that may be 24h stale.
+                validToMillis = validToStr?.let { app.kumacheck.util.parseBeatTime(it) },
             )
             _certInfo.update { it + (mid to info) }
         }
@@ -625,7 +792,12 @@ class KumaSocket {
      * The new id is returned so callers can route into the detail screen.
      */
     suspend fun addMonitor(payload: JSONObject): Triple<Boolean, Int?, String?> {
+        // Debug: log the outgoing payload + the server response so a server
+        // reject like "cannot read properties of undefined (reading 'every')"
+        // can be traced back to the exact JSON shape we sent.
+        Log.i(TAG, "addMonitor payload: $payload")
         val resp = call("add", payload)
+        Log.i(TAG, "addMonitor response: $resp")
         val ok = resp.optBoolean("ok", false)
         val id = if (resp.has("monitorID") && !resp.isNull("monitorID")) {
             when (val v = resp.opt("monitorID")) {
@@ -655,9 +827,11 @@ class KumaSocket {
         val out = ArrayList<Heartbeat>(arr.length())
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
-            runCatching { KumaJson.parseHeartbeat(o) }.getOrNull()?.let(out::add)
+            runCatching { KumaJson.parseHeartbeat(o) }
+                .onFailure { Log.w(TAG, "parse historical heartbeat failed", it) }
+                .getOrNull()?.let(out::add)
         }
-        return out.sortedBy { it.time }
+        return out.sortedWith(compareBy({ it.timeMs ?: Long.MIN_VALUE }, { it.time }))
     }
 
     /**
@@ -718,32 +892,43 @@ class KumaSocket {
         // earlier on the more common failure modes.
         val resp = withTimeout(REST_TOTAL_TIMEOUT_MS) {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = 10_000
-                    readTimeout = 10_000
-                    instanceFollowRedirects = false
-                    setRequestProperty("Accept", "application/json")
-                }
-                try {
-                    val code = conn.responseCode
+                // KS3: OkHttp instead of HttpURLConnection — connection
+                // pooling, automatic redirect handling (we still opt out via
+                // .followRedirects(false) for parity with the original),
+                // and fewer footguns than the HttpURLConnection lifecycle.
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .header("Accept", "application/json")
+                    .build()
+                restHttpClient.newCall(request).execute().use { response ->
+                    val code = response.code
                     if (code == 404) return@withContext null
                     if (code !in 200..299) throw IOException("HTTP $code")
                     // Captive-portal guard (NW5): if the upstream returned
                     // HTML (Wi-Fi sign-in page) the parse below would throw
                     // a JSONException whose message contains the raw body —
                     // surface a friendlier error instead.
-                    val contentType = conn.contentType?.lowercase().orEmpty()
+                    val contentType = response.header("Content-Type")?.lowercase().orEmpty()
                     if (contentType.isNotEmpty() && !contentType.contains("json")) {
                         throw IOException("Server returned $contentType (captive portal?)")
                     }
-                    val body = conn.inputStream.bufferedReader().use { readCapped(it) }
-                    // Empty 200 body (NW6): produce a transport-level IOException
-                    // rather than the generic JSONException("Value of type ...").
-                    if (body.isBlank()) throw IOException("empty response body")
-                    JSONObject(body)
-                } finally {
-                    conn.disconnect()
+                    // KS1 / KS3: OkHttp parses Content-Type charset for us;
+                    // `body.string()` decodes the entire response. The 2 MiB
+                    // cap is enforced via `Content-Length` upfront where the
+                    // server provides it — Kuma always does — so a hostile
+                    // multi-megabyte response is rejected before allocation.
+                    val body = response.body ?: throw IOException("empty response body")
+                    val len = body.contentLength()
+                    if (len > MAX_RESPONSE_BYTES) {
+                        throw IOException("response exceeds ${MAX_RESPONSE_BYTES} byte cap")
+                    }
+                    // Earlier `peek().readUtf8(MAX_RESPONSE_BYTES.toLong())`
+                    // call demanded *exactly* that many bytes and threw
+                    // EOFException whenever the body was smaller — i.e. on
+                    // every real status page, since they're a few KB at most.
+                    val text = body.string()
+                    if (text.isBlank()) throw IOException("empty response body")
+                    JSONObject(text)
                 }
             }
         } ?: return null
@@ -788,7 +973,9 @@ class KumaSocket {
                 id = incidentObj.optInt("id"),
                 title = incidentObj.optString("title"),
                 content = incidentObj.optString("content"),
-                style = incidentObj.optString("style").takeIf { it.isNotEmpty() && it != "null" },
+                style = app.kumacheck.data.model.IncidentStyle.from(
+                    incidentObj.optString("style").takeIf { it.isNotEmpty() && it != "null" },
+                ),
                 createdDate = incidentObj.optString("createdDate").takeIf { it.isNotEmpty() && it != "null" },
                 pin = incidentObj.optBoolean("pin", false),
             )
@@ -804,18 +991,17 @@ class KumaSocket {
     /**
      * Post a pinned incident announcement on a status page. Server replies with
      * `{ok, incident}` and the next REST fetch will surface the new incident.
-     * `style` is one of "info" / "warning" / "danger" / "primary" (Bootstrap names).
      */
     suspend fun postIncident(
         slug: String,
         title: String,
         content: String,
-        style: String = "warning",
+        style: app.kumacheck.data.model.IncidentStyle = app.kumacheck.data.model.IncidentStyle.WARNING,
     ): Pair<Boolean, String?> {
         val payload = JSONObject()
             .put("title", title)
             .put("content", content)
-            .put("style", style)
+            .put("style", style.wire)
         val resp = runCatching { callPositional("postIncident", slug, payload) }
             .getOrElse { return false to (it.message ?: "network error") }
         val ok = resp.optBoolean("ok", false)
@@ -834,9 +1020,59 @@ class KumaSocket {
 
     fun markAuthenticated() { setConnection(Connection.AUTHENTICATED) }
 
-    fun disconnect() = disconnectInternal(clearState = true)
+    fun disconnect() = synchronized(socketLifecycleLock) {
+        // K4: synchronize with connect / reconnect so a concurrent caller
+        // can't see a half-torn-down state.
+        disconnectInternal(clearState = true)
+    }
+
+    /**
+     * KS2: stop the underlying io.socket reconnect loop without forgetting
+     * the active URL — used when the app goes to background AND
+     * notifications are disabled (no MonitorService keeping us alive). The
+     * monitor / beat caches stay so the UI doesn't flash empty if the user
+     * comes back quickly. Idempotent.
+     *
+     * Calling [resumeReconnection] (or [reconnect] / [connect]) reverses
+     * the pause; the active URL stored in [currentUrl] is what
+     * [resumeReconnection] reuses.
+     */
+    fun pauseReconnection(): Boolean = synchronized(socketLifecycleLock) {
+        val s = socket ?: return false
+        socketGeneration++
+        s.off()
+        s.disconnect()
+        socket = null
+        // Fail any in-flight ack waiters; their acks will never arrive now.
+        for (cont in pendingCalls.toList()) {
+            if (pendingCalls.remove(cont)) cont.resumeWithException(IOException("paused"))
+        }
+        setConnection(Connection.DISCONNECTED)
+        Log.i(TAG, "reconnection paused for $currentUrl")
+        true
+    }
+
+    /**
+     * KS2 counterpart to [pauseReconnection]: re-arm the socket against
+     * the previously connected URL. No-op if no URL is known (sign-out,
+     * cold start) or if a socket is already live. Returns true if a
+     * fresh connect was kicked off.
+     */
+    fun resumeReconnection(): Boolean {
+        val url = synchronized(socketLifecycleLock) {
+            if (socket != null) return false
+            currentUrl ?: return false
+        }
+        Log.i(TAG, "reconnection resumed for $url")
+        return reconnect()
+    }
 
     private fun disconnectInternal(clearState: Boolean) {
+        // K3: invalidate every still-queued listener up front so even an
+        // event whose dispatch races us past `s.off()` finds the
+        // generation mismatch and no-ops. Bumped before the actual
+        // detach so there's no window where listeners look live.
+        socketGeneration++
         socket?.let {
             it.off()
             it.disconnect()
@@ -861,11 +1097,28 @@ class KumaSocket {
         }
     }
 
+    /**
+     * KS3: shared OkHttp client for the REST helper. Rebuilt once per
+     * [KumaSocket] (singleton effective, since the App holds a single
+     * `socket` instance). Configured with the same timeouts the prior
+     * HttpURLConnection used; redirects disabled for parity.
+     */
+    private val restHttpClient: okhttp3.OkHttpClient by lazy {
+        okhttp3.OkHttpClient.Builder()
+            .connectTimeout(java.time.Duration.ofMillis(10_000))
+            .readTimeout(java.time.Duration.ofMillis(10_000))
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+    }
+
     companion object {
         private const val TAG = "KumaSocket"
         private const val MAX_RECENT_BEATS = 50
         /** Hard cap on REST response body size — ~2 MiB worth of UTF-16 chars. */
         private const val MAX_RESPONSE_CHARS = 1_000_000
+        /** KS3: byte cap for OkHttp `peek().readUtf8(n)` — ~2 MiB. */
+        private const val MAX_RESPONSE_BYTES = 2 * 1024 * 1024
         /** Per-emit ack timeout. Anything heavier (e.g. import) needs its own override. */
         private const val CALL_TIMEOUT_MS = 30_000L
         /** Wall-clock cap on a single REST call (NW4). */
@@ -883,10 +1136,18 @@ class KumaSocket {
  *  - Else if `cachedVersion` (the prior connect's last-seen version, persisted
  *    via [KumaPrefs.setActiveServerKumaVersion]) is known, use that — this is
  *    what closes the Kuma 1.x race where `heartbeatList` arrives before `info`.
- *  - Else default to `true` (Kuma 2.x semantics; matches the pre-fix behavior).
+ *  - Else if the version is unknown entirely, default to `false`. K2:
+ *    Kuma 2.x always sends the explicit `overwrite` boolean, so reaching
+ *    this branch means the server *isn't* known to be 2.x — most likely
+ *    a Kuma 1.x server whose `info` push hasn't arrived yet. Defaulting
+ *    to overwrite would wipe locally seeded history; appending is the
+ *    safe choice.
+ *  - Else (version is "2.x" or another non-1.x value) default to `true`
+ *    (Kuma 2.x convention).
  *
  * Version of "1.x" → false (incremental append, the Kuma 1.x convention).
- * Anything else → true (full reseed, Kuma 2.x convention).
+ * Other known versions → true (full reseed, Kuma 2.x convention).
+ * Unknown version → false (conservative; favour append over data loss).
  */
 internal fun resolveOverwrite(
     explicit: Boolean?,
@@ -894,7 +1155,6 @@ internal fun resolveOverwrite(
     cachedVersion: String?,
 ): Boolean {
     if (explicit != null) return explicit
-    val effectiveVersion = liveVersion ?: cachedVersion
-    if (effectiveVersion?.startsWith("1.") == true) return false
-    return true
+    val effectiveVersion = liveVersion ?: cachedVersion ?: return false
+    return !effectiveVersion.startsWith("1.")
 }

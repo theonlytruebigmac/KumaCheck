@@ -11,7 +11,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -34,7 +34,7 @@ fun StatusPageDetailScreen(
     onBack: () -> Unit,
     onMonitorTap: (Int) -> Unit,
 ) {
-    val ui by vm.state.collectAsState()
+    val ui by vm.state.collectAsStateWithLifecycle()
     val title = ui.detail?.page?.title ?: "Status page"
 
     Scaffold(
@@ -72,10 +72,15 @@ fun StatusPageDetailScreen(
                 contentAlignment = Alignment.Center,
             ) { Text("Loading…", color = KumaSlate2, fontFamily = KumaFont) }
             ui.error != null && ui.detail == null -> Box(
-                modifier = Modifier.fillMaxSize().padding(padding),
+                modifier = Modifier.fillMaxSize().padding(padding).padding(24.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(ui.error!!, color = KumaDown, fontFamily = KumaFont)
+                // UX2: explicit Retry affordance so the user doesn't need
+                // to back out and re-tap the page from the list.
+                app.kumacheck.ui.common.ErrorRetryRow(
+                    message = ui.error!!,
+                    onRetry = vm::refresh,
+                )
             }
             else -> LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
@@ -119,7 +124,7 @@ fun StatusPageDetailScreen(
                                 "No monitor groups configured.",
                                 color = KumaSlate2,
                                 fontFamily = KumaFont,
-                                fontSize = 12.sp,
+                                fontSize = KumaTypography.captionLarge,
                             )
                         }
                     }
@@ -190,7 +195,7 @@ private fun OverallBanner(ui: StatusPageDetailViewModel.UiState) {
                 color = accent,
                 fontFamily = KumaFont,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 16.sp,
+                fontSize = KumaTypography.title,
             )
             Spacer(Modifier.height(4.dp))
             val baseMeta = "Updated $time · ${allMonitors.size} ${if (allMonitors.size == 1) "monitor" else "monitors"}"
@@ -199,7 +204,7 @@ private fun OverallBanner(ui: StatusPageDetailViewModel.UiState) {
                 meta,
                 color = accent.copy(alpha = 0.75f),
                 fontFamily = KumaMono,
-                fontSize = 10.sp,
+                fontSize = KumaTypography.captionSmall,
                 letterSpacing = 0.4.sp,
             )
         }
@@ -212,11 +217,10 @@ private fun IncidentCard(
     onUnpin: () -> Unit,
 ) {
     val accent = when (incident.style) {
-        "danger" -> KumaDown
-        "warning" -> KumaWarn
-        "info" -> KumaSlate
-        "primary" -> KumaUp
-        else -> KumaWarn
+        app.kumacheck.data.model.IncidentStyle.DANGER -> KumaDown
+        app.kumacheck.data.model.IncidentStyle.WARNING -> KumaWarn
+        app.kumacheck.data.model.IncidentStyle.INFO -> KumaSlate
+        app.kumacheck.data.model.IncidentStyle.PRIMARY -> KumaUp
     }
     var confirmUnpin by remember { mutableStateOf(false) }
     KumaAccentCard(accent = accent) {
@@ -225,11 +229,11 @@ private fun IncidentCard(
                 Box(Modifier.size(8.dp).clip(RoundedCornerShape(50)).background(accent))
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    (incident.style ?: "warning").uppercase(),
+                    incident.style.wire.uppercase(),
                     color = accent,
                     fontFamily = KumaMono,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 10.sp,
+                    fontSize = KumaTypography.captionSmall,
                     letterSpacing = 0.6.sp,
                 )
             }
@@ -239,7 +243,7 @@ private fun IncidentCard(
                 color = KumaInk,
                 fontFamily = KumaFont,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 14.sp,
+                fontSize = KumaTypography.bodyEmphasis,
             )
             if (incident.content.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))
@@ -247,7 +251,7 @@ private fun IncidentCard(
                     incident.content,
                     color = KumaSlate,
                     fontFamily = KumaFont,
-                    fontSize = 12.sp,
+                    fontSize = KumaTypography.captionLarge,
                 )
             }
             if (!incident.createdDate.isNullOrBlank()) {
@@ -256,7 +260,7 @@ private fun IncidentCard(
                     "Posted ${incident.createdDate}",
                     color = KumaSlate2,
                     fontFamily = KumaMono,
-                    fontSize = 10.sp,
+                    fontSize = KumaTypography.captionSmall,
                 )
             }
             Spacer(Modifier.height(10.dp))
@@ -266,7 +270,7 @@ private fun IncidentCard(
                     color = accent,
                     fontFamily = KumaMono,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 11.sp,
+                    fontSize = KumaTypography.caption,
                     letterSpacing = 0.6.sp,
                 )
             }
@@ -292,7 +296,7 @@ private fun IncidentCard(
                     "Visitors of this status page will no longer see the announcement.",
                     color = KumaSlate2,
                     fontFamily = KumaFont,
-                    fontSize = 13.sp,
+                    fontSize = KumaTypography.body,
                 )
             },
             containerColor = KumaCream,
@@ -302,7 +306,12 @@ private fun IncidentCard(
 
 @Composable
 private fun PostIncidentLauncher(
-    onSubmit: (title: String, content: String, style: String, onDone: () -> Unit) -> Unit,
+    onSubmit: (
+        title: String,
+        content: String,
+        style: app.kumacheck.data.model.IncidentStyle,
+        onDone: () -> Unit,
+    ) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
     Surface(
@@ -325,7 +334,7 @@ private fun PostIncidentLauncher(
                 "Post an incident announcement",
                 color = KumaInk,
                 fontFamily = KumaFont,
-                fontSize = 13.sp,
+                fontSize = KumaTypography.body,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.weight(1f),
             )
@@ -334,7 +343,7 @@ private fun PostIncidentLauncher(
                 color = KumaSlate2,
                 fontFamily = KumaMono,
                 fontWeight = FontWeight.Bold,
-                fontSize = 16.sp,
+                fontSize = KumaTypography.title,
             )
         }
     }
@@ -351,11 +360,15 @@ private fun PostIncidentLauncher(
 @Composable
 private fun PostIncidentDialog(
     onDismiss: () -> Unit,
-    onSubmit: (title: String, content: String, style: String) -> Unit,
+    onSubmit: (
+        title: String,
+        content: String,
+        style: app.kumacheck.data.model.IncidentStyle,
+    ) -> Unit,
 ) {
     var title by remember { mutableStateOf("") }
     var content by remember { mutableStateOf("") }
-    var style by remember { mutableStateOf("warning") }
+    var style by remember { mutableStateOf(app.kumacheck.data.model.IncidentStyle.WARNING) }
     val canSubmit = title.isNotBlank()
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -397,18 +410,17 @@ private fun PostIncidentDialog(
                     "Style",
                     color = KumaSlate2,
                     fontFamily = KumaMono,
-                    fontSize = 10.sp,
+                    fontSize = KumaTypography.captionSmall,
                     letterSpacing = 0.6.sp,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf("info", "warning", "danger", "primary").forEach { s ->
+                    app.kumacheck.data.model.IncidentStyle.entries.forEach { s ->
                         val isSel = s == style
                         val accent = when (s) {
-                            "danger" -> KumaDown
-                            "warning" -> KumaWarn
-                            "info" -> KumaSlate
-                            "primary" -> KumaUp
-                            else -> KumaWarn
+                            app.kumacheck.data.model.IncidentStyle.DANGER -> KumaDown
+                            app.kumacheck.data.model.IncidentStyle.WARNING -> KumaWarn
+                            app.kumacheck.data.model.IncidentStyle.INFO -> KumaSlate
+                            app.kumacheck.data.model.IncidentStyle.PRIMARY -> KumaUp
                         }
                         Surface(
                             shape = RoundedCornerShape(8.dp),
@@ -417,11 +429,11 @@ private fun PostIncidentDialog(
                             onClick = { style = s },
                         ) {
                             Text(
-                                s,
+                                s.wire,
                                 color = if (isSel) Color.White else KumaInk,
                                 fontFamily = KumaMono,
                                 fontWeight = if (isSel) FontWeight.SemiBold else FontWeight.Medium,
-                                fontSize = 11.sp,
+                                fontSize = KumaTypography.caption,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                             )
                         }
@@ -442,7 +454,7 @@ private fun GroupCard(monitors: List<StatusPageDetailViewModel.MonitorRow>, onMo
                     "No live data for monitors in this group.",
                     color = KumaSlate2,
                     fontFamily = KumaFont,
-                    fontSize = 12.sp,
+                    fontSize = KumaTypography.captionLarge,
                 )
             }
         }
@@ -484,7 +496,7 @@ private fun GroupRow(row: StatusPageDetailViewModel.MonitorRow, onClick: () -> U
                 color = KumaInk,
                 fontFamily = KumaFont,
                 fontWeight = FontWeight.Medium,
-                fontSize = 13.sp,
+                fontSize = KumaTypography.body,
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
             )
@@ -493,7 +505,7 @@ private fun GroupRow(row: StatusPageDetailViewModel.MonitorRow, onClick: () -> U
                 color = statusColor,
                 fontFamily = KumaMono,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 10.sp,
+                fontSize = KumaTypography.captionSmall,
                 letterSpacing = 0.5.sp,
             )
         }

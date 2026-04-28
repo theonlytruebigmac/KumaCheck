@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -31,20 +32,20 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -57,6 +58,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import app.kumacheck.data.model.Monitor
+import app.kumacheck.ui.common.KumaTimePickerDialog
 import app.kumacheck.ui.theme.KumaAccentCard
 import app.kumacheck.ui.theme.KumaCard
 import app.kumacheck.ui.theme.KumaCardBorder
@@ -71,6 +73,7 @@ import app.kumacheck.ui.theme.KumaSlate2
 import app.kumacheck.ui.theme.KumaSurface
 import app.kumacheck.ui.theme.KumaTerra
 import app.kumacheck.ui.theme.KumaUp
+import app.kumacheck.ui.theme.KumaWarn
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -81,10 +84,18 @@ fun MaintenanceEditScreen(
     vm: MaintenanceEditViewModel,
     onBack: () -> Unit,
 ) {
-    val ui by vm.state.collectAsState()
+    val ui by vm.state.collectAsStateWithLifecycle()
     val f = ui.form
+    val snackbarHostState = androidx.compose.runtime.remember { SnackbarHostState() }
 
-    LaunchedEffect(ui.saved) { if (ui.saved) onBack() }
+    // UX3: brief "Saved" confirmation before we navigate away. Same pattern
+    // as MonitorEditScreen.
+    LaunchedEffect(ui.saved) {
+        if (ui.saved) {
+            snackbarHostState.showSnackbar("Saved")
+            onBack()
+        }
+    }
 
     var showStartDate by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
     var showEndDate by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
@@ -94,6 +105,7 @@ fun MaintenanceEditScreen(
 
     Scaffold(
         containerColor = KumaCream,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -142,7 +154,13 @@ fun MaintenanceEditScreen(
             return@Scaffold
         }
         LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
+            // UX4: `imePadding()` keeps the focused field above the IME on
+            // small phones — same rationale as MonitorEditScreen.
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 16.dp)
+                .imePadding(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item { Spacer(Modifier.height(4.dp)) }
@@ -152,6 +170,23 @@ fun MaintenanceEditScreen(
                         Text(
                             ui.error!!,
                             color = KumaDown,
+                            fontFamily = KumaMono,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        )
+                    }
+                }
+            }
+            // M4: load-time parse failure banner. Shown when an existing
+            // maintenance window was loaded but at least one server date
+            // string couldn't be parsed — the form's start/end fields
+            // will be blank, and saving without a re-entry would
+            // overwrite the corrupt timestamp silently.
+            if (ui.loadDateParseFailed) {
+                item {
+                    KumaAccentCard(accent = KumaWarn.copy(alpha = 0.6f)) {
+                        Text(
+                            "Couldn't parse the saved start/end date — please re-enter before saving.",
+                            color = KumaWarn,
                             fontFamily = KumaMono,
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                         )
@@ -240,6 +275,7 @@ fun MaintenanceEditScreen(
                 MaintenanceEditViewModel.Strategy.RECURRING_DAY_OF_MONTH -> {
                     item { KumaSectionHeader("Days of month") }
                     item { DayOfMonthGrid(f.daysOfMonth, vm::onDayOfMonthToggle) }
+                    item { ShortMonthHint(f.daysOfMonth) }
                     item { KumaSectionHeader("Time window") }
                     item {
                         TimeFieldRow("start", f.recurringStartMinuteOfDay) {
@@ -340,7 +376,7 @@ fun MaintenanceEditScreen(
             MaintenanceEditViewModel.Strategy.SINGLE -> minuteOfDayOf(f.startMillis)
             else -> f.recurringStartMinuteOfDay
         }
-        TimePickerDialog(
+        KumaTimePickerDialog(
             initialMinuteOfDay = initialMinuteOfDay,
             onConfirm = { mod ->
                 if (f.strategy == MaintenanceEditViewModel.Strategy.SINGLE) {
@@ -358,7 +394,7 @@ fun MaintenanceEditScreen(
             MaintenanceEditViewModel.Strategy.SINGLE -> minuteOfDayOf(f.endMillis)
             else -> f.recurringEndMinuteOfDay
         }
-        TimePickerDialog(
+        KumaTimePickerDialog(
             initialMinuteOfDay = initialMinuteOfDay,
             onConfirm = { mod ->
                 if (f.strategy == MaintenanceEditViewModel.Strategy.SINGLE) {
@@ -542,8 +578,14 @@ private fun DateTimeFieldRow(
                 onClick = onPickTime,
             ) {
                 Box(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+                    val ctx = androidx.compose.ui.platform.LocalContext.current
                     Text(
-                        millis?.let { timeOnly(it) } ?: "—",
+                        // M1: pass Context so `timeOnly` can honour the
+                        // device 24h/12h preference. Without this the
+                        // picker (which DOES honour it) and the form
+                        // preview disagreed — picker showed 14:30, this
+                        // showed "2:30 PM".
+                        millis?.let { timeOnly(it, ctx) } ?: "—",
                         color = if (millis != null) KumaInk else KumaSlate2,
                         fontFamily = KumaMono,
                     )
@@ -600,6 +642,34 @@ private fun StepButton(text: String, onClick: () -> Unit) {
                 fontFamily = KumaMono)
         }
     }
+}
+
+/**
+ * M3: surface the implicit "this won't fire every month" trade-off when the
+ * user picks 29-31. Kuma's day-of-month strategy silently skips short months
+ * (Feb / 30-day months) — fine server-side but the user's mental model is
+ * usually "this fires every month."
+ */
+@Composable
+private fun ShortMonthHint(selected: Set<Int>) {
+    val has29 = 29 in selected
+    val has30 = 30 in selected
+    val has31 = 31 in selected
+    val message = when {
+        has31 && (has29 || has30) ->
+            "Days 29-31 will be skipped in months that don't have them (Feb / Apr / Jun / Sep / Nov)."
+        has31 -> "Day 31 will be skipped in months that don't have it (Feb / Apr / Jun / Sep / Nov)."
+        has30 -> "Day 30 will be skipped in February."
+        has29 -> "Day 29 will be skipped in non-leap-year Februaries."
+        else -> return
+    }
+    Text(
+        message,
+        color = KumaSlate2,
+        fontFamily = KumaMono,
+        style = MaterialTheme.typography.labelSmall,
+        modifier = Modifier.padding(start = 4.dp, top = 4.dp),
+    )
 }
 
 @Composable
@@ -724,45 +794,6 @@ private fun ReadOnlyHint(text: String) {
         Box(modifier = Modifier.padding(14.dp)) {
             Text(text, color = KumaSlate2, fontFamily = KumaMono,
                 style = MaterialTheme.typography.labelSmall)
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun TimePickerDialog(
-    initialMinuteOfDay: Int,
-    onConfirm: (Int) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val state = rememberTimePickerState(
-        initialHour = initialMinuteOfDay / 60,
-        initialMinute = initialMinuteOfDay % 60,
-        is24Hour = android.text.format.DateFormat.is24HourFormat(LocalContext.current),
-    )
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = KumaSurface,
-            modifier = Modifier.padding(16.dp),
-        ) {
-            Column(Modifier.padding(16.dp)) {
-                Text("Pick a time", color = KumaInk,
-                    fontFamily = KumaFont,
-                    fontWeight = FontWeight.SemiBold,
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(bottom = 12.dp))
-                TimePicker(state = state)
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    TextButton(onClick = onDismiss) { Text("Cancel", color = KumaSlate2) }
-                    TextButton(onClick = { onConfirm(state.hour * 60 + state.minute) }) {
-                        Text("OK", color = KumaUp, fontWeight = FontWeight.SemiBold)
-                    }
-                }
-            }
         }
     }
 }

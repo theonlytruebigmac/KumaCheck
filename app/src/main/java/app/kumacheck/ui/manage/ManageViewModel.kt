@@ -1,16 +1,20 @@
 package app.kumacheck.ui.manage
 
+import app.kumacheck.util.stateInVm
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.kumacheck.data.model.Monitor
 import app.kumacheck.data.model.MonitorStatus
 import app.kumacheck.data.socket.KumaSocket
+import app.kumacheck.data.socket.tryClaimSlot
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 class ManageViewModel(private val socket: KumaSocket) : ViewModel() {
@@ -47,16 +51,19 @@ class ManageViewModel(private val socket: KumaSocket) : ViewModel() {
                 )
             }
         UiState(rows = rows)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
+    }.stateInVm(this, UiState())
 
     fun setActive(id: Int, active: Boolean) {
-        if (id in _toggling.value) return
-        _toggling.value = _toggling.value + id
+        // V4 / T4: claim the toggling slot atomically via the
+        // `tryClaimSlot` extension. Returns false if another caller (a
+        // future off-Main path, e.g. auto-toggle) already claimed it —
+        // we silently skip rather than dispatching a duplicate RPC.
+        if (!_toggling.tryClaimSlot(id)) return
         viewModelScope.launch {
             try {
                 if (active) socket.resumeMonitor(id) else socket.pauseMonitor(id)
             } finally {
-                _toggling.value = _toggling.value - id
+                _toggling.update { it - id }
             }
         }
     }

@@ -28,6 +28,10 @@ class SplashViewModel(
     private val _decision = MutableStateFlow<Decision>(Decision.Loading)
     val decision: StateFlow<Decision> = _decision.asStateFlow()
 
+    /** UX5: expose live socket state so the splash phase label tracks the
+     *  actual handshake instead of running on a fixed 1.2s timer. */
+    val connection: StateFlow<KumaSocket.Connection> = socket.connection
+
     init {
         viewModelScope.launch { decide() }
     }

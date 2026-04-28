@@ -220,9 +220,57 @@ class KumaJsonTest {
         assertEquals(false, resolveOverwrite(explicit = null, liveVersion = "1.0.0", cachedVersion = "2.0.0"))
     }
 
-    @Test fun `resolveOverwrite defaults to true when both versions unknown`() {
-        // Conservative default — matches Kuma 2.x semantics; we have no
-        // basis to assume incremental append for an unknown server.
-        assertTrue(resolveOverwrite(explicit = null, liveVersion = null, cachedVersion = null))
+    @Test fun `resolveOverwrite defaults to false when both versions unknown`() {
+        // K2: Kuma 2.x servers always send the explicit `overwrite` boolean,
+        // so reaching this branch (explicit == null AND version unknown) is
+        // almost certainly a Kuma 1.x server whose `info` push hasn't
+        // arrived yet. Defaulting to overwrite would wipe locally seeded
+        // history; safer to append.
+        assertEquals(false, resolveOverwrite(explicit = null, liveVersion = null, cachedVersion = null))
+    }
+
+    // ---- P3: Monitor.name fallback ----
+
+    @Test fun `parseMonitor uses fallback when name is missing`() {
+        // P3 regression: pre-fix `optString("name")` returned `""` for a
+        // missing key, surfacing as a blank row in every list. Now we
+        // substitute a deterministic placeholder.
+        val o = JSONObject("""{"id":1, "type":"http", "active":true}""")
+        assertEquals("(unnamed)", KumaJson.parseMonitor(o).name)
+    }
+
+    @Test fun `parseMonitor uses fallback when name is empty string`() {
+        val o = JSONObject("""{"id":1, "name":"", "type":"http", "active":true}""")
+        assertEquals("(unnamed)", KumaJson.parseMonitor(o).name)
+    }
+
+    @Test fun `parseMonitor uses fallback when name is the string null`() {
+        // optStringOrNull treats the literal string "null" as null, so this
+        // also funnels through the fallback path.
+        val o = JSONObject("""{"id":1, "name":"null", "type":"http", "active":true}""")
+        assertEquals("(unnamed)", KumaJson.parseMonitor(o).name)
+    }
+
+    // ---- P4: optDoubleOrNull rejects NaN / Infinity ----
+
+    @Test fun `parseHeartbeat ping string NaN is dropped to null`() {
+        // P4 regression: pre-fix `String.toDoubleOrNull()` happily returned
+        // NaN, which then poisoned every chart that referenced it (sparkline
+        // axis math, avg ping calc). We test the string path because
+        // org.json rejects NaN / Infinity in `put(key, double)` — but Kuma
+        // can and does serialize ping values as strings on some versions.
+        val o = JSONObject("""{"monitorID":1, "status":1, "time":"x", "ping":"NaN"}""")
+        assertNull(KumaJson.parseHeartbeat(o).ping)
+    }
+
+    @Test fun `parseHeartbeat ping string Infinity is dropped to null`() {
+        val o = JSONObject("""{"monitorID":1, "status":1, "time":"x", "ping":"Infinity"}""")
+        assertNull(KumaJson.parseHeartbeat(o).ping)
+    }
+
+    @Test fun `parseHeartbeat ping finite value passes through`() {
+        // Sanity check — finite values still round-trip after the filter.
+        val o = JSONObject("""{"monitorID":1, "status":1, "time":"x", "ping":42.5}""")
+        assertEquals(42.5, KumaJson.parseHeartbeat(o).ping ?: -1.0, 0.0001)
     }
 }

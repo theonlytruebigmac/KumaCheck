@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -49,7 +50,7 @@ fun MonitorDetailScreen(
     onBack: () -> Unit,
     onEdit: () -> Unit,
 ) {
-    val ui by vm.state.collectAsState()
+    val ui by vm.state.collectAsStateWithLifecycle()
     LaunchedEffect(ui.deleted) { if (ui.deleted) onBack() }
     var showDeleteConfirm by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
 
@@ -167,7 +168,7 @@ private fun DetailTopBar(
                     "${(ui.monitor?.type ?: "—").uppercase()} · $intervalText",
                     color = KumaSlate2,
                     fontFamily = KumaMono,
-                    fontSize = 10.sp,
+                    fontSize = KumaTypography.captionSmall,
                     letterSpacing = 0.5.sp,
                 )
                 Text(
@@ -193,7 +194,22 @@ private fun DetailTopBar(
                 Icon(Icons.Filled.Edit, contentDescription = "Edit monitor", tint = KumaSlate)
             }
             IconButton(onClick = onDelete, enabled = !ui.deleting) {
-                Icon(Icons.Filled.Delete, contentDescription = "Delete monitor", tint = KumaDown)
+                if (ui.deleting) {
+                    // Visible feedback while the deleteMonitor RPC is in
+                    // flight — the suspend roundtrips to Kuma + the SQL
+                    // delete + the monitorList push, which can take a
+                    // couple of seconds on a busy server. Without this
+                    // the user sees the dialog dismiss and nothing else
+                    // happens until the screen pops, and assumes the
+                    // delete failed.
+                    CircularProgressIndicator(
+                        color = KumaDown,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(18.dp),
+                    )
+                } else {
+                    Icon(Icons.Filled.Delete, contentDescription = "Delete monitor", tint = KumaDown)
+                }
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(
@@ -209,20 +225,20 @@ private fun HeroStatCard(ui: MonitorDetailViewModel.UiState) {
     val profile = MonitorTypes.forType(ui.monitor?.type)
     val ping = ui.latest?.ping?.takeIf { it >= 0 }?.toInt()
     val pings = ui.history.mapNotNull { it.ping?.takeIf { p -> p >= 0 } }
-    // Profile drives the layout. We still fall through to StatusHero when a
-    // LATENCY-typed monitor has no usable ping data yet (fresh monitor, or
-    // server downtime ate the history) so the card never shows "—ms".
+    // Profile drives the layout. Stay on ResponseTimeHero for every
+    // LATENCY-typed monitor, even when pings is empty — it gracefully
+    // shows "—ms" and skips the chart until data lands. The previous
+    // `if (pings.isNotEmpty())` fall-through to StatusHero caused a
+    // visible layout swap on every detail-screen entry: frame 1 showed
+    // the green "Reachable" status word, frame 2 (after the 24h history
+    // fetch returned ~200ms later) replaced it with the ms chart.
     when (profile.mode) {
-        DisplayMode.LATENCY -> if (pings.isNotEmpty()) {
-            ResponseTimeHero(
-                ping = ping,
-                pings = pings,
-                isLoadingHistory = ui.isLoadingHistory,
-                latestMsg = ui.latest?.msg,
-            )
-        } else {
-            StatusHero(ui = ui, profile = profile)
-        }
+        DisplayMode.LATENCY -> ResponseTimeHero(
+            ping = ping,
+            pings = pings,
+            isLoadingHistory = ui.isLoadingHistory,
+            latestMsg = ui.latest?.msg,
+        )
         DisplayMode.STATE,
         DisplayMode.AGGREGATE -> StatusHero(ui = ui, profile = profile)
     }
@@ -245,7 +261,7 @@ private fun ResponseTimeHero(
                 "RESPONSE TIME · NOW",
                 color = KumaSlate2,
                 fontFamily = KumaMono,
-                fontSize = 10.sp,
+                fontSize = KumaTypography.captionSmall,
                 letterSpacing = 0.6.sp,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -264,7 +280,7 @@ private fun ResponseTimeHero(
                     "ms",
                     color = KumaSlate2,
                     fontFamily = KumaMono,
-                    fontSize = 14.sp,
+                    fontSize = KumaTypography.bodyEmphasis,
                     modifier = Modifier.padding(bottom = 6.dp),
                 )
                 Spacer(Modifier.weight(1f))
@@ -276,7 +292,7 @@ private fun ResponseTimeHero(
                         color = pctColor,
                         fontFamily = KumaMono,
                         fontWeight = FontWeight.SemiBold,
-                        fontSize = 12.sp,
+                        fontSize = KumaTypography.captionLarge,
                         modifier = Modifier.padding(bottom = 8.dp),
                     )
                 }
@@ -287,7 +303,7 @@ private fun ResponseTimeHero(
                     latestMsg,
                     color = KumaSlate2,
                     fontFamily = KumaMono,
-                    fontSize = 11.sp,
+                    fontSize = KumaTypography.caption,
                     maxLines = 1,
                 )
             }
@@ -336,7 +352,7 @@ private fun StatusHero(
                 "${profile.displayName.uppercase()} · NOW",
                 color = KumaSlate2,
                 fontFamily = KumaMono,
-                fontSize = 10.sp,
+                fontSize = KumaTypography.captionSmall,
                 letterSpacing = 0.6.sp,
                 fontWeight = FontWeight.SemiBold,
             )
@@ -355,7 +371,7 @@ private fun StatusHero(
                     latestMsg,
                     color = KumaSlate2,
                     fontFamily = KumaMono,
-                    fontSize = 11.sp,
+                    fontSize = KumaTypography.caption,
                     maxLines = 2,
                 )
             }
@@ -385,7 +401,7 @@ private fun StatusHero(
                         .background(KumaCream2),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text("Loading…", color = KumaSlate2, fontFamily = KumaMono, fontSize = 11.sp)
+                    Text("Loading…", color = KumaSlate2, fontFamily = KumaMono, fontSize = KumaTypography.caption)
                 }
             }
         }
@@ -429,7 +445,9 @@ private fun StatsGrid(ui: MonitorDetailViewModel.UiState) {
     val u30 = ui.uptime30d?.let { "${(it * 100).pct1()}%" } ?: "—"
     val avgPing = ui.history.mapNotNull { it.ping?.takeIf { p -> p >= 0 } }
         .let { if (it.isEmpty()) "—" else "${(it.average().toInt())}ms" }
-    val certDays = ui.certInfo?.daysRemaining?.let { "${it}d" } ?: "—"
+    // P5: re-derive against `now` so stale server snapshots don't show "10d"
+    // when wall-clock has crossed into 3d territory.
+    val certDays = ui.certInfo?.daysRemainingNow()?.let { "${it}d" } ?: "—"
 
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -451,7 +469,7 @@ private fun StatCell(label: String, value: String, modifier: Modifier = Modifier
                 label.uppercase(),
                 color = KumaSlate2,
                 fontFamily = KumaMono,
-                fontSize = 10.sp,
+                fontSize = KumaTypography.captionSmall,
                 letterSpacing = 0.5.sp,
             )
             Spacer(Modifier.height(4.dp))
@@ -460,7 +478,7 @@ private fun StatCell(label: String, value: String, modifier: Modifier = Modifier
                 color = KumaInk,
                 fontFamily = KumaMono,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 16.sp,
+                fontSize = KumaTypography.title,
             )
         }
     }
@@ -468,7 +486,8 @@ private fun StatCell(label: String, value: String, modifier: Modifier = Modifier
 
 @Composable
 private fun CertCard(info: app.kumacheck.data.socket.KumaSocket.CertInfo) {
-    val days = info.daysRemaining
+    // P5: client-derived against `now` (see CertInfo.daysRemainingNow).
+    val days = info.daysRemainingNow()
     val accent = when {
         !info.valid -> KumaDown
         days == null -> KumaSlate
@@ -486,7 +505,7 @@ private fun CertCard(info: app.kumacheck.data.socket.KumaSocket.CertInfo) {
                 contentAlignment = Alignment.Center,
             ) {
                 Text("TLS", color = accent, fontFamily = KumaMono,
-                    fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                    fontWeight = FontWeight.Bold, fontSize = KumaTypography.captionSmall)
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
@@ -495,7 +514,7 @@ private fun CertCard(info: app.kumacheck.data.socket.KumaSocket.CertInfo) {
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = 13.sp,
+                    fontSize = KumaTypography.body,
                 )
                 val sub = when {
                     !info.valid -> "Invalid certificate"
@@ -507,7 +526,7 @@ private fun CertCard(info: app.kumacheck.data.socket.KumaSocket.CertInfo) {
                     sub,
                     color = KumaSlate2,
                     fontFamily = KumaMono,
-                    fontSize = 10.sp,
+                    fontSize = KumaTypography.captionSmall,
                 )
             }
             Text(
@@ -516,7 +535,7 @@ private fun CertCard(info: app.kumacheck.data.socket.KumaSocket.CertInfo) {
                 color = accent,
                 fontFamily = KumaMono,
                 fontWeight = FontWeight.Bold,
-                fontSize = 13.sp,
+                fontSize = KumaTypography.body,
             )
         }
     }
@@ -547,14 +566,14 @@ private fun MuteCard(muted: Boolean, onToggle: (Boolean) -> Unit) {
                     color = KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = FontWeight.Medium,
-                    fontSize = 13.sp,
+                    fontSize = KumaTypography.body,
                 )
                 Text(
                     if (muted) "Alerts suppressed for this monitor"
                     else "Alert me on incidents and recoveries",
                     color = KumaSlate2,
                     fontFamily = KumaFont,
-                    fontSize = 11.sp,
+                    fontSize = KumaTypography.caption,
                 )
             }
             Switch(
@@ -576,7 +595,7 @@ private fun RecentChecksList(history: List<Heartbeat>) {
     if (history.isEmpty()) {
         KumaCard {
             Box(modifier = Modifier.fillMaxWidth().padding(20.dp), contentAlignment = Alignment.Center) {
-                Text("No checks yet", color = KumaSlate2, fontFamily = KumaMono, fontSize = 11.sp)
+                Text("No checks yet", color = KumaSlate2, fontFamily = KumaMono, fontSize = KumaTypography.caption)
             }
         }
         return
@@ -599,7 +618,7 @@ private fun CheckRow(hb: Heartbeat) {
     // the prior `takeLast(8).take(8)` which emitted `34:56Z` garbage. Falls
     // back to the raw string if it doesn't parse — better to show something
     // odd than to crash.
-    val time = parseBeatTime(hb.time)
+    val time = (hb.timeMs ?: parseBeatTime(hb.time))
         ?.let { HMS_FORMATTER.format(java.util.Date(it)) }
         ?: hb.time
     // For status-only monitors (Docker etc.) ping is null/negative — drop the
@@ -621,7 +640,7 @@ private fun CheckRow(hb: Heartbeat) {
             time,
             color = KumaSlate2,
             fontFamily = KumaMono,
-            fontSize = 11.sp,
+            fontSize = KumaTypography.caption,
             modifier = Modifier.widthIn(min = 64.dp),
         )
         Spacer(Modifier.width(10.dp))
@@ -631,7 +650,7 @@ private fun CheckRow(hb: Heartbeat) {
             statusText,
             color = KumaInk,
             fontFamily = KumaFont,
-            fontSize = 12.sp,
+            fontSize = KumaTypography.captionLarge,
             modifier = Modifier.weight(1f),
             maxLines = 1,
         )
@@ -641,7 +660,7 @@ private fun CheckRow(hb: Heartbeat) {
                 color = KumaInk,
                 fontFamily = KumaMono,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = 12.sp,
+                fontSize = KumaTypography.captionLarge,
             )
         }
     }

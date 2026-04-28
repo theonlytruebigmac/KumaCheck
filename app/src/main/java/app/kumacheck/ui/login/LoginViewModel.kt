@@ -90,8 +90,13 @@ class LoginViewModel(
         viewModelScope.launch {
             repeat(MAX_SUBMIT_CAS_TRIES) {
                 val s = _state.value
-                val url = s.serverUrl.trim().ifEmpty { return@launch setError("Server URL required") }
-                if (!isValidServerUrl(url)) return@launch setError("Server URL must start with http:// or https:// and include a host")
+                val rawUrl = s.serverUrl.trim().ifEmpty { return@launch setError("Server URL required") }
+                if (!isValidServerUrl(rawUrl)) return@launch setError("Server URL must start with http:// or https:// and include a host")
+                // A3: normalize the URL once, here, before it reaches prefs
+                // or the socket. Lowercases scheme + host, drops trailing
+                // slash, strips default ports. Without this, "https://kuma/"
+                // and "https://Kuma" land as two separate server entries.
+                val url = normalizeServerUrl(rawUrl)
                 val user = s.username.trim().ifEmpty { return@launch setError("Username required") }
                 val pass = s.password.ifEmpty { return@launch setError("Password required") }
                 if (s.isWorking) return@launch
@@ -166,9 +171,32 @@ class LoginViewModel(
         val parsed = runCatching { java.net.URI(url) }.getOrNull() ?: return false
         val scheme = parsed.scheme?.lowercase() ?: return false
         if (scheme != "http" && scheme != "https") return false
+        // Reject embedded user-info ("http://user:pass@host") — both a
+        // phishing vector and a likely paste-error. Kuma servers are
+        // socket-authenticated, not HTTP-Basic.
+        if (parsed.userInfo != null) return false
         val host = parsed.host ?: return false
         return host.isNotBlank()
     }
+
+    /**
+     * Apply scheme + host casing rules and trim noise so two visually
+     * different inputs that point at the same server collapse to one
+     * canonical form. Idempotent on already-normalized URLs. The
+     * function assumes the input has already passed [isValidServerUrl].
+     *
+     * Rules:
+     *  - scheme + host lowercased
+     *  - trailing slash on the path stripped (keep "/" if it's the only
+     *    path char so the URI still parses cleanly)
+     *  - default ports dropped: `:80` for http, `:443` for https
+     *  - any user-info / query / fragment dropped (rejected by the
+     *    validator already, but defensive)
+     *
+     * Delegates to a top-level helper so unit tests can call it without
+     * standing up the full ViewModel + dependencies.
+     */
+    private fun normalizeServerUrl(url: String): String = normalizeServerUrlImpl(url)
 
     /**
      * Drop the active server entry if it's an empty placeholder (LOGIN_ADD
@@ -187,4 +215,35 @@ class LoginViewModel(
         const val KEY_USERNAME = "loginvm.username"
         const val KEY_TOTP_REQUIRED = "loginvm.totpRequired"
     }
+}
+
+/**
+ * A3: normalize a Kuma server URL into a canonical form so two visually
+ * different inputs (`https://kuma/`, `HTTPS://kuma:443`) don't get persisted
+ * as separate server entries. Top-level so unit tests can hit it directly.
+ *
+ * Caller must pass a URL that already validated cleanly (`http://` or
+ * `https://` scheme, non-blank host, no embedded user-info). Best-effort
+ * on malformed input — returns the input unchanged if `URI` rejects it.
+ */
+internal fun normalizeServerUrlImpl(url: String): String {
+    val parsed = runCatching { java.net.URI(url) }.getOrNull() ?: return url
+    val scheme = parsed.scheme?.lowercase() ?: return url
+    val host = parsed.host?.lowercase() ?: return url
+    val explicitPort = parsed.port
+    val effectivePort = when {
+        explicitPort < 0 -> -1
+        scheme == "http" && explicitPort == 80 -> -1
+        scheme == "https" && explicitPort == 443 -> -1
+        else -> explicitPort
+    }
+    // Strip every trailing slash (including a lone "/") so
+    // "https://kuma/" and "https://kuma" collapse to one entry. URIs
+    // without a path are valid in the wire format we hand to socket.io.
+    val rawPath = (parsed.rawPath ?: "").trimEnd('/')
+    val sb = StringBuilder()
+    sb.append(scheme).append("://").append(host)
+    if (effectivePort >= 0) sb.append(':').append(effectivePort)
+    sb.append(rawPath)
+    return sb.toString()
 }

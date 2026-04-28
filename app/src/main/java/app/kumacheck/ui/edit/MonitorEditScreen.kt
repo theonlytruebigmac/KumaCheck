@@ -13,7 +13,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.remember
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -32,18 +33,32 @@ fun MonitorEditScreen(
     onBack: () -> Unit,
     onCreated: ((Int) -> Unit)? = null,
 ) {
-    val ui by vm.state.collectAsState()
+    val ui by vm.state.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
 
+    // UX3 navigate-on-save behaviour:
+    //  - **Create**: navigate immediately to the new monitor's detail screen.
+    //    The detail screen *is* the success signal — popping up a snackbar
+    //    here would block the suspend point inside `showSnackbar(...)` for
+    //    ~4 s before `onCreated(...)` ran, leaving the user staring at the
+    //    edit form.
+    //  - **Edit**: show "Saved" briefly, then navigate back. We're returning
+    //    to the same detail screen the user came from, so the snackbar is
+    //    the only confirmation they get that the change landed.
     LaunchedEffect(ui.saved, ui.createdId) {
-        if (ui.saved) {
-            val newId = ui.createdId
-            if (ui.isCreate && newId != null && onCreated != null) onCreated(newId)
-            else onBack()
+        if (!ui.saved) return@LaunchedEffect
+        val newId = ui.createdId
+        if (ui.isCreate && newId != null && onCreated != null) {
+            onCreated(newId)
+        } else {
+            snackbarHostState.showSnackbar("Saved")
+            onBack()
         }
     }
 
     Scaffold(
         containerColor = KumaCream,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             // Cancel | Title | Save toolbar matching the asset-pack mockup.
             // statusBarsPadding pushes us below the status-bar inset because we
@@ -64,7 +79,7 @@ fun MonitorEditScreen(
                         "Cancel",
                         color = KumaSlate,
                         fontFamily = KumaFont,
-                        fontSize = 14.sp,
+                        fontSize = KumaTypography.bodyEmphasis,
                     )
                 }
                 Text(
@@ -92,7 +107,7 @@ fun MonitorEditScreen(
                             color = KumaTerra,
                             fontFamily = KumaFont,
                             fontWeight = FontWeight.SemiBold,
-                            fontSize = 14.sp,
+                            fontSize = KumaTypography.bodyEmphasis,
                         )
                     }
                 }
@@ -109,7 +124,14 @@ fun MonitorEditScreen(
             return@Scaffold
         }
         LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
+            // UX4: `imePadding()` so the focused field stays above the IME on
+            // small phones. Without this the keyboard could cover the bottom
+            // form rows and the user has to manually scroll past it.
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 16.dp)
+                .imePadding(),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             if (ui.error != null) {
@@ -189,7 +211,7 @@ private fun TypeGrid(selected: String, onSelect: (String) -> Unit) {
                                 color = if (isSel) KumaCream else KumaInk,
                                 fontFamily = KumaMono,
                                 fontWeight = FontWeight.SemiBold,
-                                fontSize = 13.sp,
+                                fontSize = KumaTypography.body,
                             )
                             Text(
                                 sub,
@@ -303,129 +325,7 @@ private fun LazyListScope.typeSpecificFields(
             }
             item { KumaSectionHeader("Authentication") }
             item { AuthMethodChips(ui.form.authMethod, vm::onAuthMethod) }
-            when (ui.form.authMethod) {
-                "basic" -> {
-                    item { KumaSectionHeader("Username") }
-                    item {
-                        KumaInputField(
-                            value = ui.form.basicAuthUser,
-                            onChange = vm::onBasicAuthUser,
-                            placeholder = "user",
-                        )
-                    }
-                    item { KumaSectionHeader("Password") }
-                    item {
-                        KumaInputField(
-                            value = ui.form.basicAuthPass,
-                            onChange = vm::onBasicAuthPass,
-                            placeholder = "••••••••",
-                            password = true,
-                        )
-                    }
-                }
-                "ntlm" -> {
-                    item { KumaSectionHeader("Username") }
-                    item { KumaInputField(value = ui.form.basicAuthUser, onChange = vm::onBasicAuthUser, placeholder = "user") }
-                    item { KumaSectionHeader("Password") }
-                    item {
-                        KumaInputField(
-                            value = ui.form.basicAuthPass,
-                            onChange = vm::onBasicAuthPass,
-                            placeholder = "••••••••",
-                            password = true,
-                        )
-                    }
-                    item { KumaSectionHeader("Domain") }
-                    item { KumaInputField(value = ui.form.authDomain, onChange = vm::onAuthDomain, placeholder = "EXAMPLE", monospace = true) }
-                    item { KumaSectionHeader("Workstation (optional)") }
-                    item { KumaInputField(value = ui.form.authWorkstation, onChange = vm::onAuthWorkstation, monospace = true) }
-                }
-                "oauth2-cc" -> {
-                    item { KumaSectionHeader("Token URL") }
-                    item {
-                        KumaInputField(
-                            value = ui.form.oauthTokenUrl,
-                            onChange = vm::onOauthTokenUrl,
-                            placeholder = "https://auth.example.com/oauth2/token",
-                            keyboardType = KeyboardType.Uri,
-                            monospace = true,
-                        )
-                    }
-                    item { KumaSectionHeader("Client ID") }
-                    item { KumaInputField(value = ui.form.oauthClientId, onChange = vm::onOauthClientId, monospace = true) }
-                    item { KumaSectionHeader("Client secret") }
-                    item {
-                        KumaInputField(
-                            value = ui.form.oauthClientSecret,
-                            onChange = vm::onOauthClientSecret,
-                            password = true,
-                        )
-                    }
-                    item { KumaSectionHeader("Scopes (optional)") }
-                    item {
-                        KumaInputField(
-                            value = ui.form.oauthScopes,
-                            onChange = vm::onOauthScopes,
-                            placeholder = "read write",
-                            monospace = true,
-                        )
-                    }
-                    item { KumaSectionHeader("Token auth method") }
-                    item {
-                        KumaInputField(
-                            value = ui.form.oauthAuthMethod,
-                            onChange = vm::onOauthAuthMethod,
-                            placeholder = "client_secret_basic",
-                            monospace = true,
-                        )
-                    }
-                }
-                "mtls" -> {
-                    item { KumaSectionHeader("CA certificate (PEM)") }
-                    item {
-                        KumaInputField(
-                            value = ui.form.tlsCa, onChange = vm::onTlsCa,
-                            placeholder = "-----BEGIN CERTIFICATE-----…",
-                            monospace = true, singleLine = false,
-                        )
-                    }
-                    item { KumaSectionHeader("Client certificate (PEM)") }
-                    item {
-                        KumaInputField(
-                            value = ui.form.tlsCert, onChange = vm::onTlsCert,
-                            placeholder = "-----BEGIN CERTIFICATE-----…",
-                            monospace = true, singleLine = false,
-                        )
-                    }
-                    item { KumaSectionHeader("Client private key (PEM)") }
-                    item {
-                        KumaInputField(
-                            value = ui.form.tlsKey, onChange = vm::onTlsKey,
-                            placeholder = "-----BEGIN PRIVATE KEY-----…",
-                            monospace = true, singleLine = false, password = true,
-                        )
-                    }
-                }
-                "" -> {} // No auth — nothing to render.
-                else -> {
-                    // Unknown future method — round-trip via raw, surface as read-only.
-                    item {
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = KumaCream2,
-                            border = BorderStroke(1.dp, KumaCardBorder),
-                        ) {
-                            Text(
-                                "${ui.form.authMethod.uppercase()} configured — edit in the Kuma web UI",
-                                color = KumaSlate2,
-                                fontFamily = KumaMono,
-                                fontSize = 11.sp,
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                            )
-                        }
-                    }
-                }
-            }
+            authMethodFields(ui, vm)
             if (type == "keyword") {
                 item { KumaSectionHeader("Keyword") }
                 item {
@@ -587,7 +487,7 @@ private fun LazyListScope.typeSpecificFields(
                         "Docker host is configured in the Kuma web UI — kept as-is on save.",
                         color = KumaSlate2,
                         fontFamily = KumaMono,
-                        fontSize = 11.sp,
+                        fontSize = KumaTypography.caption,
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
                     )
                 }
@@ -710,7 +610,7 @@ private fun LazyListScope.typeSpecificFields(
                         "SASL options round-trip from the Kuma web UI — leave to it for now.",
                         color = KumaSlate2,
                         fontFamily = KumaMono,
-                        fontSize = 11.sp,
+                        fontSize = KumaTypography.caption,
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
                     )
                 }
@@ -736,7 +636,7 @@ private fun LazyListScope.typeSpecificFields(
                             "Browser host is configured in the Kuma web UI — kept as-is on save.",
                             color = KumaSlate2,
                             fontFamily = KumaMono,
-                            fontSize = 11.sp,
+                            fontSize = KumaTypography.caption,
                         )
                         if (ui.form.remoteBrowsersId.isNotBlank()) {
                             Spacer(Modifier.height(4.dp))
@@ -744,7 +644,7 @@ private fun LazyListScope.typeSpecificFields(
                                 "host_id=${ui.form.remoteBrowsersId}",
                                 color = KumaSlate2,
                                 fontFamily = KumaMono,
-                                fontSize = 10.sp,
+                                fontSize = KumaTypography.captionSmall,
                             )
                         }
                     }
@@ -760,7 +660,7 @@ private fun LazyListScope.typeSpecificFields(
                             color = KumaSlate2,
                             fontFamily = KumaMono,
                             fontWeight = FontWeight.SemiBold,
-                            fontSize = 10.sp,
+                            fontSize = KumaTypography.captionSmall,
                             letterSpacing = 0.6.sp,
                         )
                         Spacer(Modifier.height(8.dp))
@@ -768,7 +668,7 @@ private fun LazyListScope.typeSpecificFields(
                             "Type-specific fields aren't editable here yet — edit in the Kuma web UI. Existing values are preserved on save.",
                             color = KumaSlate2,
                             fontFamily = KumaFont,
-                            fontSize = 12.sp,
+                            fontSize = KumaTypography.captionLarge,
                         )
                         Spacer(Modifier.height(12.dp))
                         if (!ui.monitor?.hostname.isNullOrBlank()) {
@@ -809,7 +709,7 @@ private fun IntervalChips(seconds: Int, onSelect: (Int) -> Unit) {
                         color = if (isSel) Color.White else KumaInk,
                         fontFamily = KumaMono,
                         fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
+                        fontSize = KumaTypography.body,
                     )
                 }
             }
@@ -845,7 +745,7 @@ private fun LabeledStatField(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun KumaInputField(
+internal fun KumaInputField(
     value: String,
     onChange: (String) -> Unit,
     placeholder: String? = null,
@@ -867,7 +767,7 @@ private fun KumaInputField(
         value = value,
         onValueChange = onChange,
         placeholder = placeholder?.let {
-            { Text(it, color = KumaSlate2, fontFamily = if (monospace) KumaMono else KumaFont, fontSize = 13.sp) }
+            { Text(it, color = KumaSlate2, fontFamily = if (monospace) KumaMono else KumaFont, fontSize = KumaTypography.body) }
         },
         singleLine = singleLine,
         keyboardOptions = KeyboardOptions(keyboardType = effectiveKeyboard),
@@ -881,7 +781,7 @@ private fun KumaInputField(
         textStyle = androidx.compose.ui.text.TextStyle(
             color = KumaInk,
             fontFamily = if (monospace) KumaMono else KumaFont,
-            fontSize = 13.sp,
+            fontSize = KumaTypography.body,
         ),
         colors = OutlinedTextFieldDefaults.colors(
             unfocusedBorderColor = KumaCardBorder,
@@ -922,7 +822,7 @@ private fun AuthMethodChips(current: String, onSelect: (String) -> Unit) {
                     color = if (isSel) Color.White else KumaInk,
                     fontFamily = KumaFont,
                     fontWeight = if (isSel) FontWeight.SemiBold else FontWeight.Medium,
-                    fontSize = 13.sp,
+                    fontSize = KumaTypography.body,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                 )
             }
@@ -937,14 +837,14 @@ private fun KvLine(key: String, value: String) {
             "${key.uppercase()}=",
             color = KumaSlate2,
             fontFamily = KumaMono,
-            fontSize = 11.sp,
+            fontSize = KumaTypography.caption,
             modifier = Modifier.width(90.dp),
         )
         Text(
             value,
             color = KumaInk,
             fontFamily = KumaMono,
-            fontSize = 11.sp,
+            fontSize = KumaTypography.caption,
             fontWeight = FontWeight.SemiBold,
         )
     }
@@ -964,7 +864,7 @@ private fun BoolSwitchRow(
             label,
             color = KumaInk,
             fontFamily = KumaFont,
-            fontSize = 13.sp,
+            fontSize = KumaTypography.body,
             fontWeight = FontWeight.Medium,
             modifier = Modifier.weight(1f),
         )
