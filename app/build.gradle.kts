@@ -16,8 +16,8 @@ android {
         applicationId = "app.kumacheck"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.5.1"
+        versionCode = 4
+        versionName = "1.0.0"
         // C4: instrumented test scaffolding. AndroidJUnitRunner is the
         // standard runner; tests live in `app/src/androidTest/`. We don't
         // wire connected-device runs into the default CI workflow (the
