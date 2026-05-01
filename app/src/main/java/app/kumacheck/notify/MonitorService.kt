@@ -205,27 +205,6 @@ class MonitorService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
-    /**
-     * Android 15+ caps `dataSync` foreground services at ~6 hours cumulative
-     * per 24 hours. When the cap is hit the system invokes `onTimeout` and
-     * gives us a few seconds to call `stopSelf`, otherwise it kills us
-     * forcibly. Post a user-visible notification first so they know to
-     * reopen the app and resume monitoring.
-     */
-    override fun onTimeout(startId: Int, fgsType: Int) {
-        Log.w(TAG, "FGS timed out (Android 15 dataSync cap); shutting down")
-        runCatching {
-            val nm = NotificationManagerCompat.from(this)
-            if (Notifications.hasPostPermission(this)) {
-                nm.notify(
-                    Notifications.MONITORING_PAUSED_ID,
-                    Notifications.buildMonitoringPaused(this),
-                )
-            }
-        }.onFailure { Log.w(TAG, "monitoring-paused notify failed", it) }
-        stopSelf(startId)
-    }
-
     override fun onDestroy() {
         scope.cancel()
         super.onDestroy()
@@ -233,10 +212,14 @@ class MonitorService : Service() {
 
     private fun startForegroundCompat(notification: android.app.Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // specialUse: AOSP getTimeLimitForFgsType returns Long.MAX_VALUE
+            // for everything other than dataSync / mediaProcessing, so this
+            // FGS is uncapped on Android 14/15. Justified for sideloaded
+            // distribution by the manifest <property> on this service.
             startForeground(
                 Notifications.FOREGROUND_NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
             )
         } else {
             startForeground(Notifications.FOREGROUND_NOTIFICATION_ID, notification)

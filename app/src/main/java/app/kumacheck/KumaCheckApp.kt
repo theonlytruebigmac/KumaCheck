@@ -8,12 +8,15 @@ import android.os.Build
 import android.util.Log
 import app.kumacheck.data.auth.AuthRepository
 import app.kumacheck.data.auth.KumaPrefs
+import app.kumacheck.data.auth.NotificationMode
 import app.kumacheck.data.socket.KumaSocket
 import app.kumacheck.data.model.IncidentLogEntry
 import app.kumacheck.data.model.MonitorState
 import app.kumacheck.data.model.MonitorStatus
 import app.kumacheck.notify.MonitorService
 import app.kumacheck.notify.Notifications
+import app.kumacheck.notify.NtfyService
+import app.kumacheck.notify.Watchdog
 import app.kumacheck.notify.widget.SnapshotWriter
 import app.kumacheck.notify.widget.StatusSnapshot
 import app.kumacheck.util.parseBeatTime
@@ -174,17 +177,27 @@ class KumaCheckApp : Application() {
                 androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.removeObserver(obs)
             }
         }.flowOn(kotlinx.coroutines.Dispatchers.Main)
+        // Notification-mode router. Picks the right background mechanism for
+        // the user's chosen mode, switching cleanly when the mode changes:
+        //   OFF              → nothing running
+        //   INSTANT_NTFY     → NtfyService (specialUse FGS holding ntfy SSE)
+        //                       + watchdog alarm
+        //   LIVE_MONITORING  → MonitorService (specialUse FGS holding socket.io)
+        //                       + watchdog alarm
+        //
+        // Modes are mutually exclusive. The previous mode's mechanism is
+        // always torn down before the new one starts so a flip can't leave
+        // both FGSes active.
         appScope.launch {
             migrationsDone.await()
             combine(
-                prefs.notificationsEnabled,
+                prefs.notificationMode,
                 prefs.token,
                 notifPermissionFlow,
-            ) { enabled, token, perm ->
-                enabled && !token.isNullOrBlank() && perm
-            }.debounce(200).distinctUntilChanged().collect { shouldRun ->
-                if (shouldRun) startMonitorServiceSafely()
-                else MonitorService.stop(this@KumaCheckApp)
+            ) { mode, token, perm ->
+                Triple(mode, !token.isNullOrBlank(), perm)
+            }.debounce(200).distinctUntilChanged().collect { (mode, hasToken, hasPerm) ->
+                applyNotificationMode(mode, hasToken, hasPerm)
             }
         }
 
@@ -214,13 +227,18 @@ class KumaCheckApp : Application() {
             migrationsDone.await()
             combine(
                 foregroundFlow,
-                prefs.notificationsEnabled,
+                prefs.notificationMode,
                 prefs.token,
-            ) { foreground, notifsEnabled, token ->
-                // Need the socket if any of: an Activity is in foreground,
-                // OR the user wants notifications and we have a session
-                // (MonitorService is keeping us alive).
-                foreground || (notifsEnabled && !token.isNullOrBlank())
+            ) { foreground, mode, token ->
+                // The socket is only needed if either:
+                //   a) an Activity is in foreground (always need it for UI), OR
+                //   b) the chosen mode actively uses the socket in background.
+                // INSTANT_NTFY uses ntfy SSE in background, BATTERY_SAVER
+                // uses a fresh socket in the worker — neither needs the
+                // app's long-lived socket while the user isn't looking.
+                val backgroundNeeds = mode == NotificationMode.LIVE_MONITORING &&
+                    !token.isNullOrBlank()
+                foreground || backgroundNeeds
             }.distinctUntilChanged().collect { needed ->
                 if (needed) socket.resumeReconnection()
                 else socket.pauseReconnection()
@@ -437,20 +455,65 @@ class KumaCheckApp : Application() {
     }
 
     /**
-     * Start [MonitorService] without crashing if the system blocks the FGS
-     * launch. Today the only writers of `notificationsEnabled` and `token`
-     * are foreground UI flows, so this is purely defensive — but if a future
-     * path ever flips them from a background context, Android 12+ would throw
-     * [ForegroundServiceStartNotAllowedException]. The next time the prefs
-     * change while the app is foreground, the collector will retry.
+     * Apply the user's chosen [NotificationMode]. Tears down whatever was
+     * previously running before starting the new mechanism so a flip can't
+     * leave both an FGS and a worker active. Called from the prefs collector
+     * in [onCreate] and from [MainActivity.onStart] to recover the FGS on
+     * app foreground if the OEM killed it overnight.
      *
-     * Also called from [MainActivity.onStart] to recover from the Android 15
-     * `dataSync` 6h cap when the user reopens the app after the system stopped
-     * the service.
+     * If [hasToken] is false or [hasPerm] is false, behaves as if the mode
+     * were OFF: every mechanism gets stopped. The collector will re-fire
+     * once the prereqs are met.
+     */
+    internal fun applyNotificationMode(
+        mode: NotificationMode,
+        hasToken: Boolean,
+        hasPerm: Boolean,
+    ) {
+        if (!hasToken || !hasPerm || mode == NotificationMode.OFF) {
+            MonitorService.stop(this)
+            NtfyService.stop(this)
+            Watchdog.cancel(this)
+            return
+        }
+        when (mode) {
+            NotificationMode.OFF -> {} // unreachable
+            NotificationMode.INSTANT_NTFY -> {
+                MonitorService.stop(this)
+                startServiceSafely { NtfyService.start(this) }
+                Watchdog.schedule(this)
+            }
+            NotificationMode.LIVE_MONITORING -> {
+                NtfyService.stop(this)
+                startServiceSafely { MonitorService.start(this) }
+                Watchdog.schedule(this)
+            }
+        }
+    }
+
+    /**
+     * Backward-compat shim — older call sites (notably [MainActivity.onStart])
+     * just want "start the monitoring path that matches current prefs."
+     * Delegates to [applyNotificationMode] which knows the full picture.
      */
     internal fun startMonitorServiceSafely() {
+        appScope.launch {
+            val mode = prefs.notificationModeOnce()
+            val hasToken = !prefs.tokenOnce().isNullOrBlank()
+            val hasPerm = Notifications.hasPostPermission(this@KumaCheckApp)
+            applyNotificationMode(mode, hasToken, hasPerm)
+        }
+    }
+
+    /**
+     * Wraps a `Service.start` call so the system blocking us from launching
+     * an FGS in background (Android 12+ throws
+     * [ForegroundServiceStartNotAllowedException]) doesn't crash the app —
+     * the next prefs change while the app is foreground will retry.
+     */
+    private fun startServiceSafely(start: () -> Unit) {
         try {
-            MonitorService.start(this)
+            start()
         } catch (e: Throwable) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
                 e is ForegroundServiceStartNotAllowedException) {

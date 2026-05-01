@@ -2,6 +2,7 @@ package app.kumacheck.ui.settings
 
 import android.Manifest
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -19,15 +20,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Logout
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
@@ -49,6 +55,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import app.kumacheck.data.auth.NotificationMode
 import app.kumacheck.data.auth.ThemeMode
 import app.kumacheck.data.socket.KumaSocket
 import app.kumacheck.notify.Notifications
@@ -170,7 +177,25 @@ fun SettingsScreen(
 
         item { Spacer(Modifier.height(4.dp)) }
         item { KumaSectionHeader("Notifications") }
-        item { NotificationsCard(ui, vm::setNotificationsEnabled) }
+        item {
+            NotificationModeCard(
+                ui = ui,
+                onSelect = vm::setNotificationMode,
+            )
+        }
+        if (ui.notificationMode == NotificationMode.INSTANT_NTFY) {
+            item {
+                NtfyConfigCard(
+                    serverUrl = ui.ntfyServerUrl,
+                    topic = ui.ntfyTopic,
+                    onSave = vm::setNtfyConfig,
+                )
+            }
+        }
+        if (ui.notificationMode == NotificationMode.INSTANT_NTFY ||
+            ui.notificationMode == NotificationMode.LIVE_MONITORING) {
+            item { ReliabilityChecklistCard() }
+        }
         if (ui.notificationsEnabled) {
             item {
                 QuietHoursCard(
@@ -582,10 +607,20 @@ private fun AddServerEntry(onClick: () -> Unit) {
     }
 }
 
+/**
+ * Notification delivery mode picker. Replaces the on/off Switch with a
+ * 4-option chooser (Off / Instant ntfy / Live monitoring / Battery saver).
+ *
+ * Permission flow: any non-OFF selection requires POST_NOTIFICATIONS. We
+ * intercept the click, request the permission, and only persist the new
+ * mode once granted. If the user revokes the permission later (system
+ * Settings), the ON_RESUME observer flips the mode back to OFF so prefs
+ * never disagree with what's actually possible.
+ */
 @Composable
-private fun NotificationsCard(
+private fun NotificationModeCard(
     ui: SettingsViewModel.UiState,
-    onToggle: (Boolean) -> Unit,
+    onSelect: (NotificationMode) -> Unit,
 ) {
     val ctx = LocalContext.current
     val activity = ctx as? Activity
@@ -593,21 +628,14 @@ private fun NotificationsCard(
         mutableStateOf(
             Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             ContextCompat.checkSelfPermission(
-                ctx, Manifest.permission.POST_NOTIFICATIONS
+                ctx, Manifest.permission.POST_NOTIFICATIONS,
             ) == PackageManager.PERMISSION_GRANTED
         )
     }
-    // True once the user has denied + selected "don't ask again" — at that
-    // point launcher.launch returns immediately without showing a dialog,
-    // so we send them to the system app-notification settings instead.
     var permanentlyDenied by remember { mutableStateOf(false) }
+    /** The mode the user wanted right before the permission prompt. */
+    var pendingMode by remember { mutableStateOf<NotificationMode?>(null) }
 
-    // ST2: re-check POST_NOTIFICATIONS on every RESUME and auto-correct the
-    // prefs flag if the user revoked permission while we were paused (system
-    // settings, system notification long-press → "Disable", etc.). Without
-    // this the toggle visually shows "off" via `notificationsEnabled &&
-    // hasPostPerm` while prefs still say true — KumaCheckApp keeps the
-    // service alive and every nm.notify() silently no-ops.
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -617,7 +645,9 @@ private fun NotificationsCard(
                         ctx, Manifest.permission.POST_NOTIFICATIONS,
                     ) == PackageManager.PERMISSION_GRANTED
                 hasPostPerm = granted
-                if (!granted && ui.notificationsEnabled) onToggle(false)
+                if (!granted && ui.notificationMode != NotificationMode.OFF) {
+                    onSelect(NotificationMode.OFF)
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -630,15 +660,13 @@ private fun NotificationsCard(
         hasPostPerm = granted
         if (granted) {
             permanentlyDenied = false
-            onToggle(true)
+            pendingMode?.let(onSelect)
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && activity != null) {
-            // After a denial, if the system says we should NOT show a
-            // rationale, we're either pre-first-prompt (impossible here —
-            // we just got a result) or the user picked "don't ask again."
             permanentlyDenied = !ActivityCompat.shouldShowRequestPermissionRationale(
-                activity, Manifest.permission.POST_NOTIFICATIONS
+                activity, Manifest.permission.POST_NOTIFICATIONS,
             )
         }
+        pendingMode = null
     }
 
     val openAppNotificationSettings = {
@@ -648,70 +676,422 @@ private fun NotificationsCard(
         runCatching { ctx.startActivity(intent) }
     }
 
-    val showPermWarning = ui.notificationsEnabled && !hasPostPerm
-    val on = ui.notificationsEnabled && hasPostPerm
+    val request: (NotificationMode) -> Unit = { wanted ->
+        if (wanted == NotificationMode.OFF || hasPostPerm) {
+            onSelect(wanted)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (permanentlyDenied) {
+                openAppNotificationSettings()
+            } else {
+                pendingMode = wanted
+                launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        } else {
+            hasPostPerm = true
+            onSelect(wanted)
+        }
+    }
+
+    val showPermWarning = ui.notificationMode != NotificationMode.OFF && !hasPostPerm
 
     KumaCard {
-        Row(
-            Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Box(
-                Modifier.size(40.dp).clip(RoundedCornerShape(10.dp))
-                    .background(if (on) KumaTerra.copy(alpha = 0.12f) else KumaCream2),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(Icons.Filled.Notifications, contentDescription = null,
-                    tint = if (on) KumaTerra else KumaSlate)
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(40.dp).clip(RoundedCornerShape(10.dp))
+                        .background(
+                            if (ui.notificationMode != NotificationMode.OFF)
+                                KumaTerra.copy(alpha = 0.12f)
+                            else KumaCream2,
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Filled.Notifications,
+                        contentDescription = null,
+                        tint = if (ui.notificationMode != NotificationMode.OFF)
+                            KumaTerra
+                        else KumaSlate,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Text(
+                        "Delivery",
+                        color = KumaInk,
+                        fontFamily = KumaFont,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = KumaTypography.bodyEmphasis,
+                    )
+                    Text(
+                        when {
+                            showPermWarning && permanentlyDenied ->
+                                "Notifications blocked — tap below to retry"
+                            showPermWarning ->
+                                "Permission needed — tap a mode to retry"
+                            else -> "How KumaCheck wakes you up for outages"
+                        },
+                        color = if (showPermWarning) KumaDown else KumaSlate2,
+                        fontFamily = KumaFont,
+                        fontSize = KumaTypography.captionLarge,
+                    )
+                }
             }
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    "Push alerts",
-                    color = KumaInk,
-                    fontFamily = KumaFont,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = KumaTypography.bodyEmphasis,
-                )
-                Text(
-                    when {
-                        showPermWarning && permanentlyDenied ->
-                            "Notifications blocked — tap to open system settings"
-                        showPermWarning -> "Permission denied — tap to retry"
-                        on -> "On for incidents and recoveries"
-                        else -> "Off"
-                    },
-                    color = if (showPermWarning) KumaDown else KumaSlate2,
-                    fontFamily = KumaFont,
-                    fontSize = KumaTypography.captionLarge,
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            Switch(
-                checked = on,
-                onCheckedChange = { wantsOn ->
-                    if (wantsOn) {
-                        if (hasPostPerm) onToggle(true)
-                        else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            if (permanentlyDenied) openAppNotificationSettings()
-                            else launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        } else {
-                            hasPostPerm = true
-                            onToggle(true)
-                        }
-                    } else {
-                        onToggle(false)
-                    }
-                },
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White,
-                    checkedTrackColor = KumaTerra,
-                    uncheckedThumbColor = Color.White,
-                    uncheckedTrackColor = KumaPaused,
-                ),
+            Spacer(Modifier.height(12.dp))
+            ModeOptionRow(
+                mode = NotificationMode.INSTANT_NTFY,
+                selected = ui.notificationMode == NotificationMode.INSTANT_NTFY,
+                title = "Instant alerts via ntfy",
+                subtitle = "Recommended · light battery · per-monitor mute won't apply",
+                badge = "RECOMMENDED",
+                icon = Icons.Filled.Bolt,
+                onClick = { request(NotificationMode.INSTANT_NTFY) },
+            )
+            ModeOptionRow(
+                mode = NotificationMode.LIVE_MONITORING,
+                selected = ui.notificationMode == NotificationMode.LIVE_MONITORING,
+                title = "Live monitoring",
+                subtitle = "Hold the Kuma connection open · instant alerts · moderate battery",
+                badge = null,
+                icon = Icons.Filled.Refresh,
+                onClick = { request(NotificationMode.LIVE_MONITORING) },
+            )
+            ModeOptionRow(
+                mode = NotificationMode.OFF,
+                selected = ui.notificationMode == NotificationMode.OFF,
+                title = "Off",
+                subtitle = "No background notifications",
+                badge = null,
+                icon = null,
+                onClick = { request(NotificationMode.OFF) },
             )
         }
     }
+}
+
+@Composable
+private fun ModeOptionRow(
+    mode: NotificationMode,
+    selected: Boolean,
+    title: String,
+    subtitle: String,
+    badge: String?,
+    icon: ImageVector?,
+    onClick: () -> Unit,
+) {
+    @Suppress("UNUSED_PARAMETER") val _unused = mode
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+        shape = RoundedCornerShape(10.dp),
+        color = if (selected) KumaTerra.copy(alpha = 0.10f) else KumaCream2,
+        border = BorderStroke(
+            1.dp,
+            if (selected) KumaTerra.copy(alpha = 0.45f) else KumaCardBorder,
+        ),
+        onClick = onClick,
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(
+                selected = selected,
+                onClick = onClick,
+                colors = RadioButtonDefaults.colors(
+                    selectedColor = KumaTerra,
+                    unselectedColor = KumaSlate2,
+                ),
+            )
+            Spacer(Modifier.width(4.dp))
+            if (icon != null) {
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = if (selected) KumaTerra2 else KumaSlate,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+            }
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        title,
+                        color = KumaInk,
+                        fontFamily = KumaFont,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        fontSize = KumaTypography.body,
+                    )
+                    if (badge != null) {
+                        Spacer(Modifier.width(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = KumaTerra.copy(alpha = 0.18f),
+                        ) {
+                            Text(
+                                badge,
+                                color = KumaTerra2,
+                                fontFamily = KumaMono,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 9.sp,
+                                letterSpacing = 0.5.sp,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+                            )
+                        }
+                    }
+                }
+                Text(
+                    subtitle,
+                    color = KumaSlate2,
+                    fontFamily = KumaFont,
+                    fontSize = KumaTypography.caption,
+                    lineHeight = 14.sp,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Ntfy server URL + topic. Only shown when [NotificationMode.INSTANT_NTFY]
+ * is selected. The "Generate" button mints a random topic so the user can
+ * paste a unique URL into Kuma without inventing one. Setup steps in Kuma
+ * are linked inline so the user knows what to do with the URL.
+ */
+@Composable
+private fun NtfyConfigCard(
+    serverUrl: String?,
+    topic: String?,
+    onSave: (String?, String?) -> Unit,
+) {
+    var localServer by androidx.compose.runtime.saveable.rememberSaveable(serverUrl) {
+        mutableStateOf(serverUrl ?: DEFAULT_NTFY_SERVER)
+    }
+    var localTopic by androidx.compose.runtime.saveable.rememberSaveable(topic) {
+        mutableStateOf(topic ?: "")
+    }
+    val configured = !serverUrl.isNullOrBlank() && !topic.isNullOrBlank()
+
+    KumaCard {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(40.dp).clip(RoundedCornerShape(10.dp))
+                        .background(KumaCream2),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, tint = KumaSlate)
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Ntfy topic",
+                        color = KumaInk,
+                        fontFamily = KumaFont,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = KumaTypography.bodyEmphasis,
+                    )
+                    Text(
+                        if (configured) "Configured · waiting for alerts"
+                        else "Required · paste topic URL or generate one",
+                        color = if (configured) KumaUp else KumaWarn,
+                        fontFamily = KumaFont,
+                        fontSize = KumaTypography.captionLarge,
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = localServer,
+                onValueChange = { localServer = it },
+                singleLine = true,
+                label = { Text("Server") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = localTopic,
+                onValueChange = { localTopic = it },
+                singleLine = true,
+                label = { Text("Topic") },
+                trailingIcon = {
+                    IconButton(onClick = { localTopic = randomNtfyTopic() }) {
+                        Icon(
+                            Icons.Filled.Shuffle,
+                            contentDescription = "Generate random topic",
+                            tint = KumaSlate,
+                        )
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "In Kuma: Settings → Notifications → Setup notification → " +
+                    "type \"ntfy\" → use this server and topic → tick \"Apply " +
+                    "on all existing monitors.\" To avoid duplicates, set " +
+                    "this as your only default notification (no other " +
+                    "providers on the same monitors).",
+                color = KumaSlate2,
+                fontFamily = KumaFont,
+                fontSize = KumaTypography.caption,
+                lineHeight = 14.sp,
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                TextButton(
+                    onClick = {
+                        onSave(
+                            localServer.takeIf { it.isNotBlank() },
+                            localTopic.takeIf { it.isNotBlank() },
+                        )
+                    },
+                ) { Text("Save", color = KumaTerra2) }
+            }
+        }
+    }
+}
+
+/**
+ * On-device reliability hints. Battery optimization exemption and exact
+ * alarm permission both meaningfully improve background reliability for
+ * the FGS-backed modes; this card surfaces their state and lets the user
+ * fix them in one tap.
+ */
+@Composable
+private fun ReliabilityChecklistCard() {
+    val ctx = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    var ignoresBatteryOpt by remember {
+        mutableStateOf(checkIgnoresBatteryOptimizations(ctx))
+    }
+    var canScheduleExact by remember { mutableStateOf(checkCanScheduleExact(ctx)) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                ignoresBatteryOpt = checkIgnoresBatteryOptimizations(ctx)
+                canScheduleExact = checkCanScheduleExact(ctx)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    KumaCard {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+            Text(
+                "Background reliability",
+                color = KumaInk,
+                fontFamily = KumaFont,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = KumaTypography.bodyEmphasis,
+            )
+            Text(
+                "These permissions help the OS keep KumaCheck running so " +
+                    "alerts arrive even after hours of silence.",
+                color = KumaSlate2,
+                fontFamily = KumaFont,
+                fontSize = KumaTypography.caption,
+                lineHeight = 14.sp,
+            )
+            Spacer(Modifier.height(10.dp))
+            ChecklistRow(
+                granted = ignoresBatteryOpt,
+                title = "Battery optimization exempt",
+                rationale = "Stops Android from killing the monitor in deep sleep.",
+                actionLabel = if (ignoresBatteryOpt) null else "Grant",
+                onAction = {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                        .setData(android.net.Uri.parse("package:${ctx.packageName}"))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    runCatching { ctx.startActivity(intent) }
+                },
+            )
+            Spacer(Modifier.height(8.dp))
+            ChecklistRow(
+                granted = canScheduleExact,
+                title = "Exact alarms allowed",
+                rationale = "Lets the watchdog wake every 9 min to revive a killed service.",
+                actionLabel = if (canScheduleExact) null else "Grant",
+                onAction = {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        runCatching { ctx.startActivity(intent) }
+                    }
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChecklistRow(
+    granted: Boolean,
+    title: String,
+    rationale: String,
+    actionLabel: String?,
+    onAction: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.size(28.dp).clip(RoundedCornerShape(50))
+                .background(
+                    if (granted) KumaUp.copy(alpha = 0.15f) else KumaWarnBg,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                if (granted) Icons.Filled.Check else Icons.Filled.Warning,
+                contentDescription = null,
+                tint = if (granted) KumaUp else KumaWarn,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                color = KumaInk,
+                fontFamily = KumaFont,
+                fontWeight = FontWeight.Medium,
+                fontSize = KumaTypography.body,
+            )
+            Text(
+                rationale,
+                color = KumaSlate2,
+                fontFamily = KumaFont,
+                fontSize = KumaTypography.caption,
+                lineHeight = 14.sp,
+            )
+        }
+        if (actionLabel != null) {
+            TextButton(onClick = onAction) {
+                Text(actionLabel, color = KumaTerra2)
+            }
+        }
+    }
+}
+
+private const val DEFAULT_NTFY_SERVER = "https://ntfy.sh"
+
+private fun randomNtfyTopic(): String {
+    val alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+    val random = java.security.SecureRandom()
+    return "kumacheck-" + (1..16).map { alphabet[random.nextInt(alphabet.length)] }.joinToString("")
+}
+
+private fun checkIgnoresBatteryOptimizations(ctx: Context): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+    val pm = ctx.getSystemService(android.os.PowerManager::class.java) ?: return false
+    return pm.isIgnoringBatteryOptimizations(ctx.packageName)
+}
+
+private fun checkCanScheduleExact(ctx: Context): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+    val am = ctx.getSystemService(android.app.AlarmManager::class.java) ?: return false
+    return am.canScheduleExactAlarms()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

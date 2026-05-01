@@ -5,8 +5,29 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!--
+        specialUse: only FGS type without the 6h/24h `dataSync` cap on
+        Android 14+. Justified for sideloaded distribution by the
+        <property> on each <service>; Play Store would require review of
+        that property value, which doesn't apply here.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!--
+        Watchdog alarm restarts the FGS if it gets killed (OEM battery
+        managers, low memory, transient network issues). USE_EXACT_ALARM is
+        granted at install time on Android 13+; SCHEDULE_EXACT_ALARM is the
+        runtime-grantable variant for Android 12 and the user-revocable
+        equivalent on 14+.
+    -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <!--
+        Lets us send the user to the per-app battery optimization screen so
+        they can grant the exemption that keeps the FGS alive long-term.
+    -->
+    <uses-permission
+        android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:name=".KumaCheckApp"
@@ -31,7 +52,24 @@
         <service
             android:name=".notify.MonitorService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="continuous_uptime_kuma_socket_monitoring" />
+        </service>
+
+        <service
+            android:name=".notify.NtfyService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="continuous_ntfy_push_subscription" />
+        </service>
+
+        <receiver
+            android:name=".notify.WatchdogReceiver"
+            android:exported="false" />
 
         <!--
             Unexported: BOOT_COMPLETED and MY_PACKAGE_REPLACED are protected

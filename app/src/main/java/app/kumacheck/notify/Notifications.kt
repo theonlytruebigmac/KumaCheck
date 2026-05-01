@@ -25,7 +25,6 @@ object Notifications {
     const val CHANNEL_RECOVERIES = "kuma_recoveries"
 
     const val FOREGROUND_NOTIFICATION_ID = 1
-    const val MONITORING_PAUSED_ID = 2
     private const val PER_MONITOR_ID_OFFSET = 100_000
 
     fun ensureChannels(context: Context) {
@@ -112,30 +111,6 @@ object Notifications {
             .build()
     }
 
-    /**
-     * Posted when Android 15's `dataSync` foreground-service 6-hour cap kicks
-     * in and forces the monitoring service to stop. Tap → reopen the app,
-     * which re-starts the service via [MainActivity.onStart].
-     */
-    fun buildMonitoringPaused(context: Context): android.app.Notification {
-        return NotificationCompat.Builder(context, CHANNEL_INCIDENTS)
-            .setSmallIcon(R.drawable.ic_notification)
-            .setColor(COLOR_BRAND)
-            .setContentTitle("Monitoring paused")
-            .setContentText("Reopen KumaCheck to resume background alerts.")
-            .setStyle(
-                NotificationCompat.BigTextStyle().bigText(
-                    "Android limits how long background apps can run continuous monitoring (about 6 hours per day on Android 15). " +
-                        "Open KumaCheck to start a fresh session — your alerts will resume immediately."
-                )
-            )
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_STATUS)
-            .setAutoCancel(true)
-            .setContentIntent(openAppIntent(context, monitorId = null))
-            .build()
-    }
-
     fun buildRecovery(context: Context, monitor: Monitor, hb: Heartbeat): android.app.Notification {
         val ping = hb.ping?.takeIf { it >= 0 }?.toInt()
         val body = if (ping != null) "Back up · ${ping}ms" else "Back up"
@@ -150,6 +125,14 @@ object Notifications {
             .setContentIntent(openAppIntent(context, monitorId = monitor.id))
             .build()
     }
+
+    /**
+     * Public no-monitor variant for callers (NtfyService, etc.) that need a
+     * "tap → open the app" PendingIntent without minting a deep-link nonce.
+     * Per-monitor notifications still go through the private overload so the
+     * nonce path stays in one place.
+     */
+    fun openAppIntent(context: Context): PendingIntent = openAppIntent(context, monitorId = null)
 
     private fun openAppIntent(context: Context, monitorId: Int?): PendingIntent {
         val intent = Intent(context, MainActivity::class.java).apply {

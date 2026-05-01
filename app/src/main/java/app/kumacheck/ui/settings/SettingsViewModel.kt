@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.kumacheck.data.auth.AuthRepository
 import app.kumacheck.data.auth.KumaPrefs
+import app.kumacheck.data.auth.NotificationMode
 import app.kumacheck.data.auth.ServerEntry
 import app.kumacheck.data.auth.ThemeMode
 import app.kumacheck.data.socket.KumaSocket
@@ -32,6 +33,9 @@ class SettingsViewModel(
         val connection: KumaSocket.Connection = KumaSocket.Connection.DISCONNECTED,
         val info: KumaSocket.ServerInfo? = null,
         val notificationsEnabled: Boolean = false,
+        val notificationMode: NotificationMode = NotificationMode.OFF,
+        val ntfyServerUrl: String? = null,
+        val ntfyTopic: String? = null,
         val quietHoursEnabled: Boolean = false,
         val quietHoursStartMinute: Int = 22 * 60,
         val quietHoursEndMinute: Int = 7 * 60,
@@ -79,7 +83,9 @@ class SettingsViewModel(
         val info: KumaSocket.ServerInfo?,
     )
     private data class NotifBits(
-        val notificationsEnabled: Boolean,
+        val mode: NotificationMode,
+        val ntfyServerUrl: String?,
+        val ntfyTopic: String?,
         val quietEnabled: Boolean,
         val quietStart: Int,
         val quietEnd: Int,
@@ -99,10 +105,24 @@ class SettingsViewModel(
         val server = combine(
             prefs.serverUrl, prefs.username, socket.connection, socket.serverInfo,
         ) { url, user, conn, info -> ServerBits(url, user, conn, info) }
-        val notif = combine(
-            prefs.notificationsEnabled, prefs.quietHoursEnabled,
-            prefs.quietHoursStart, prefs.quietHoursEnd,
-        ) { enabled, qe, qs, qend -> NotifBits(enabled, qe, qs, qend) }
+        // Two intermediate combines because Flow.combine maxes out at 5 flows
+        // and we need 6 notification-related signals here.
+        val notifModeBits = combine(
+            prefs.notificationMode, prefs.ntfyServerUrl, prefs.ntfyTopic,
+        ) { mode, url, topic -> Triple(mode, url, topic) }
+        val notifQuietBits = combine(
+            prefs.quietHoursEnabled, prefs.quietHoursStart, prefs.quietHoursEnd,
+        ) { qe, qs, qend -> Triple(qe, qs, qend) }
+        val notif = combine(notifModeBits, notifQuietBits) { m, q ->
+            NotifBits(
+                mode = m.first,
+                ntfyServerUrl = m.second,
+                ntfyTopic = m.third,
+                quietEnabled = q.first,
+                quietStart = q.second,
+                quietEnd = q.third,
+            )
+        }
         val list = combine(
             prefs.servers, prefs.activeServerId, prefs.themeMode, prefs.tokensStoredPlaintext,
         ) { servers, id, theme, plaintext -> ServerListBits(servers, id, theme, plaintext) }
@@ -115,7 +135,10 @@ class SettingsViewModel(
                 username = s.username,
                 connection = s.connection,
                 info = s.info,
-                notificationsEnabled = n.notificationsEnabled,
+                notificationsEnabled = n.mode != NotificationMode.OFF,
+                notificationMode = n.mode,
+                ntfyServerUrl = n.ntfyServerUrl,
+                ntfyTopic = n.ntfyTopic,
                 quietHoursEnabled = n.quietEnabled,
                 quietHoursStartMinute = n.quietStart,
                 quietHoursEndMinute = n.quietEnd,
@@ -146,6 +169,14 @@ class SettingsViewModel(
         viewModelScope.launch {
             prefs.setNotificationsEnabled(enabled)
         }
+    }
+
+    fun setNotificationMode(mode: NotificationMode) {
+        viewModelScope.launch { prefs.setNotificationMode(mode) }
+    }
+
+    fun setNtfyConfig(serverUrl: String?, topic: String?) {
+        viewModelScope.launch { prefs.setNtfyConfig(serverUrl, topic) }
     }
 
     fun setQuietHoursEnabled(enabled: Boolean) {

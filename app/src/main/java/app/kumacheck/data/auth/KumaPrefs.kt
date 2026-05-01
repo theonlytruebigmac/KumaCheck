@@ -104,7 +104,18 @@ class KumaPrefs(
     private val ACTIVE_SERVER_ID = intPreferencesKey("active_server_id")
 
     // --- App-global prefs ---
+    /**
+     * Legacy boolean. Replaced by [NOTIFICATION_MODE] but still read on first
+     * launch after upgrade to derive the initial mode (true → LIVE_MONITORING,
+     * false → OFF). Once the user picks a mode explicitly we drop this key.
+     */
     private val NOTIFICATIONS_ENABLED = booleanPreferencesKey("notifications_enabled")
+    /** [NotificationMode] name (or null for first-run default OFF). */
+    private val NOTIFICATION_MODE = stringPreferencesKey("notification_mode")
+    /** Ntfy server base URL (e.g. `https://ntfy.sh`) for [NotificationMode.INSTANT_NTFY]. */
+    private val NTFY_SERVER_URL = stringPreferencesKey("ntfy_server_url")
+    /** Ntfy topic for [NotificationMode.INSTANT_NTFY]. */
+    private val NTFY_TOPIC = stringPreferencesKey("ntfy_topic")
     private val QUIET_HOURS_ENABLED = booleanPreferencesKey("quiet_hours_enabled")
     private val QUIET_HOURS_START = intPreferencesKey("quiet_hours_start")
     private val QUIET_HOURS_END = intPreferencesKey("quiet_hours_end")
@@ -180,8 +191,29 @@ class KumaPrefs(
     val serverUrl: Flow<String?> = activeServer.map { it?.url }
     val token: Flow<String?> = activeServer.map { it?.token }
     val username: Flow<String?> = activeServer.map { it?.username }
+    /**
+     * The active notification delivery strategy. On first read after an upgrade
+     * from the boolean-only era, falls back to deriving from [NOTIFICATIONS_ENABLED]
+     * (true → LIVE_MONITORING, false → OFF) so an existing user keeps the
+     * behavior they had before. The derived value is *not* persisted here —
+     * only an explicit [setNotificationMode] writes the new key — so the
+     * legacy boolean stays authoritative until the user touches the picker.
+     */
+    val notificationMode: Flow<NotificationMode> = ctx.dataStore.data.map { p ->
+        val raw = p[NOTIFICATION_MODE]
+        if (raw != null) return@map NotificationMode.fromString(raw)
+        if (p[NOTIFICATIONS_ENABLED] == true) NotificationMode.LIVE_MONITORING
+        else NotificationMode.OFF
+    }
+    /**
+     * Derived: true iff [notificationMode] is anything other than OFF. Kept
+     * as a Flow so existing consumers (KumaCheckApp's socket-pause logic,
+     * Settings UI's quiet-hours visibility) don't all need to change.
+     */
     val notificationsEnabled: Flow<Boolean> =
-        ctx.dataStore.data.map { it[NOTIFICATIONS_ENABLED] ?: false }
+        notificationMode.map { it != NotificationMode.OFF }
+    val ntfyServerUrl: Flow<String?> = ctx.dataStore.data.map { it[NTFY_SERVER_URL] }
+    val ntfyTopic: Flow<String?> = ctx.dataStore.data.map { it[NTFY_TOPIC] }
     @OptIn(ExperimentalCoroutinesApi::class)
     val pinnedMonitorIds: Flow<Set<Int>> = activeServerId.flatMapLatest { id ->
         if (id == null) flowOf(emptySet())
@@ -285,6 +317,9 @@ class KumaPrefs(
     suspend fun serverUrlOnce(): String? = serverUrl.first()
     suspend fun tokenOnce(): String? = token.first()
     suspend fun notificationsEnabledOnce(): Boolean = notificationsEnabled.first()
+    suspend fun notificationModeOnce(): NotificationMode = notificationMode.first()
+    suspend fun ntfyServerUrlOnce(): String? = ntfyServerUrl.first()
+    suspend fun ntfyTopicOnce(): String? = ntfyTopic.first()
     suspend fun activeServerOnce(): ServerEntry? = activeServer.first()
     suspend fun serversOnce(): List<ServerEntry> = servers.first()
     suspend fun activeServerKumaVersionOnce(): String? = activeServerKumaVersion.first()
@@ -553,8 +588,37 @@ class KumaPrefs(
         p.remove(incidentLogKeyFor(id))
         p.remove(kumaVersionKeyFor(id))
     }
-    suspend fun setNotificationsEnabled(enabled: Boolean) = ctx.dataStore.edit {
-        it[NOTIFICATIONS_ENABLED] = enabled
+    /**
+     * Legacy boolean setter — kept so callers that haven't migrated still
+     * work, and so the in-app revoke-permission path can flip the user out
+     * without forcing them through the mode picker. Translates to:
+     *   true  → preserve current mode if it's already non-OFF, else default
+     *           to LIVE_MONITORING (the legacy behavior).
+     *   false → OFF.
+     */
+    suspend fun setNotificationsEnabled(enabled: Boolean) = ctx.dataStore.edit { p ->
+        if (enabled) {
+            val cur = NotificationMode.fromString(p[NOTIFICATION_MODE])
+            val next = if (cur == NotificationMode.OFF) NotificationMode.LIVE_MONITORING else cur
+            p[NOTIFICATION_MODE] = next.name
+        } else {
+            p[NOTIFICATION_MODE] = NotificationMode.OFF.name
+        }
+        p[NOTIFICATIONS_ENABLED] = enabled
+    }
+    suspend fun setNotificationMode(mode: NotificationMode) = ctx.dataStore.edit { p ->
+        p[NOTIFICATION_MODE] = mode.name
+        // Keep the legacy boolean in sync so any unmigrated reader still
+        // sees the right state. Once every consumer has been moved to
+        // notificationMode/notificationsEnabled-derived-from-mode, this
+        // mirror write can be deleted.
+        p[NOTIFICATIONS_ENABLED] = mode != NotificationMode.OFF
+    }
+    suspend fun setNtfyConfig(serverUrl: String?, topic: String?) = ctx.dataStore.edit { p ->
+        val trimmedUrl = serverUrl?.trim()?.trimEnd('/')?.takeIf { it.isNotEmpty() }
+        val trimmedTopic = topic?.trim()?.takeIf { it.isNotEmpty() }
+        if (trimmedUrl == null) p.remove(NTFY_SERVER_URL) else p[NTFY_SERVER_URL] = trimmedUrl
+        if (trimmedTopic == null) p.remove(NTFY_TOPIC) else p[NTFY_TOPIC] = trimmedTopic
     }
     suspend fun setPinnedMonitorIds(ids: Set<Int>) = ctx.dataStore.edit { p ->
         val activeId = resolveActiveId(p) ?: return@edit

@@ -101,12 +101,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        // Re-ensure the monitoring service is running. Covers the Android 15
-        // `dataSync` 6h cap case: the system stopped MonitorService while
-        // backgrounded, and the in-process prefs collector won't re-emit
-        // because the underlying state didn't change. Foreground entry is
-        // our retry hook. ContextCompat.startForegroundService is a no-op
-        // when the service is already running, so this is safe to call always.
+        // Re-apply the chosen notification mode on every foreground entry.
+        // The FGS uses `specialUse` so it's not capped by the OS, but OEM
+        // battery managers (Xiaomi, Huawei, Samsung One UI Deep Sleep) still
+        // routinely kill background services regardless of API contracts —
+        // foreground entry is the cheap retry hook. `applyNotificationMode`
+        // is idempotent (start of an already-running service is a no-op).
         val app = application as KumaCheckApp
         lifecycleScope.launch {
             val enabled = app.prefs.notificationsEnabledOnce()
